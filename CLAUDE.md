@@ -57,23 +57,31 @@ audience: str         # general | educational | active | kids
 - Times stored as wall-clock America/Los_Angeles; localize on read, don't assume UTC.
 - Display: 12-hour clock with AM/PM ("7:30 PM"), date as "May 9, 2026" / "Sunday, May 10".
 
-## Geographic scope
+## Geographic scope — 4 zones
 
-Use `city` field for neighborhood (the German project used it for separate cities; here it's intra-LA neighborhood):
+LA traffic makes travel time the binding filter, not literal neighborhood. Use 4
+zones (decided 2026-05-10) so each chip has 3-5 venues and matches how
+Angelenos talk about distance:
 
-- **DTLA** (Downtown LA — Music Center cluster, MOCA Grand, The Broad, REDCAT, Disney Hall, Geffen Contemporary)
-- **Hollywood** (Hollywood Bowl, Egyptian Theatre, Catalina Bar & Grill)
-- **Westside** (Hammer, Geffen Playhouse, Royce Hall, Getty Center, The Broad Stage)
-- **Mid-Wilshire** (LACMA, Craft Contemporary)
-- **Pasadena** (Pasadena Playhouse, Norton Simon, Huntington, A Noise Within, Boston Court)
-- **Beverly Hills** (The Wallis)
-- **Santa Monica** (The Broad Stage, Aero Theatre)
-- **Long Beach** (Long Beach Symphony, MOLAA)
-- **Brentwood / Pacific Palisades** (Getty Villa)
-- **Sepulveda Pass** (Skirball)
-- **Griffith Park** (Greek Theatre, Autry)
-- **Northridge** (The Soraya at CSUN)
-- **Little Tokyo** (East West Players, Aratani)
+- **Westside** — Hammer, Getty Center, Getty Villa (Pacific Palisades),
+  Geffen Playhouse, Royce Hall, Broad Stage (Santa Monica), Skirball
+  (Sepulveda Pass), Wallis (Beverly Hills)
+- **Central LA** — LACMA (Mid-Wilshire), MOCA, Disney Hall, LA Phil,
+  LA Opera, CTG (Music Center), Hollywood Bowl, American Cinematheque,
+  The Broad
+- **Pasadena & East** — Pasadena Playhouse, Norton Simon, Huntington
+  (San Marino), A Noise Within, LACO (Glendale), Pasadena Symphony
+- **Greater LA** — Long Beach Symphony, MOLAA, Soraya (Northridge),
+  outliers >20mi from DTLA
+
+Drop venues into one of these four. Edge cases: Sepulveda Pass / Skirball goes
+to Westside (cultural circuit, not Valley); Glendale goes to Pasadena & East
+(traffic and culture lean east); Pacific Palisades is Westside (Getty Villa
+shares programming with the Center).
+
+Discover LA aggregator events arrive with literal `addressLocality` (e.g.
+"Pasadena", "Long Beach", "Hollywood"). The `json_ld_aggregator` parser maps
+these to the 4 zones via a city-zone table inside the parser.
 
 ## Onboarding order (Tier-1)
 

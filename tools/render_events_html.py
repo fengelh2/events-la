@@ -711,7 +711,7 @@ def _render_html(
     for city_slug, venues in venues_by_city.items():
         parts.append(f'  <nav class="venue-chips city-{city_slug}" aria-label="Filter by venue">')
         parts.append('    <span class="filter-label">Venues</span>')
-        parts.append('    <button type="button" class="venue-chip-all" data-city="{}">Reset</button>'.format(city_slug))
+        parts.append('    <button type="button" class="venue-chip-all" data-city="{}">All</button>'.format(city_slug))
         for chip_id, vname, _venue_ids, cats in venues:
             cat_classes = " ".join(f"has-cat-{c}" for c in sorted(cats))
             parts.append(
@@ -802,10 +802,17 @@ def _render_html(
     parts.append('      if(!anyChecked||checked[vid]) el.classList.remove("venue-hidden");')
     parts.append('      else el.classList.add("venue-hidden");')
     parts.append('    });')
+    parts.append('    // "Reset" button is the visual default — highlight it when no')
+    parts.append('    // venue chips are checked, dim it when the user has picked specific venues.')
+    parts.append('    document.querySelectorAll(".venue-chip-all").forEach(function(b){')
+    parts.append('      b.classList.toggle("active",!anyChecked);')
+    parts.append('    });')
     parts.append('  }')
     parts.append('  document.querySelectorAll(\'input.filter-input[id^="v-"]\').forEach(function(c){')
     parts.append('    c.addEventListener("change",applyVenueFilter);')
     parts.append('  });')
+    parts.append('  // Initialize "Reset" highlight on page load (default = active).')
+    parts.append('  applyVenueFilter();')
     parts.append('  // "Alle" button = clear venue selection (uncheck all chips, show everything).')
     parts.append('  document.querySelectorAll(".venue-chip-all").forEach(function(b){')
     parts.append('    b.addEventListener("click",function(){')
@@ -1577,7 +1584,10 @@ _PAGE_HEAD = """<!DOCTYPE html>
     #f-exh:checked     ~ .filter-panel .venue-chips .venue-chip:not(.has-cat-exh)     {{ display: none; }}
     #f-film:checked    ~ .filter-panel .venue-chips .venue-chip:not(.has-cat-film)    {{ display: none; }}
     /* "Alle" reset button — same chip shape, slightly emphasized on hover */
-    .venue-chip-all:hover {{ background: var(--ink); color: var(--bg); border-color: var(--ink); }}
+    /* "Reset" button — `.active` is toggled by JS when no venue chips are
+       checked, so it visually reads as the current selection. */
+    .venue-chip-all:hover,
+    .venue-chip-all.active {{ background: var(--ink); color: var(--bg); border-color: var(--ink); }}
     .venue-checkbox {{
       width: 10px;
       height: 10px;

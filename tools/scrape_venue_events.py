@@ -83,6 +83,10 @@ def scrape(venue_row: dict, session: Optional[requests.Session] = None) -> list[
             events = _scrape_detail_pages(venue_row, session=session)
         elif kind == "static":
             events = _scrape_static(venue_row)
+        elif kind == "json_ld_aggregator":
+            events = _scrape_json_ld_aggregator(venue_row, session=session)
+        elif kind == "tribe_rest":
+            events = _scrape_tribe_rest(venue_row, session=session)
         elif kind == "unknown":
             log.info("skip %s: kind=unknown (pending onboarding)", venue_id)
             return []
@@ -216,6 +220,403 @@ def _scrape_static(venue_row: dict) -> list[Event]:
             )
         )
     return out
+
+
+# ─── json-ld aggregator path ────────────────────────────────────────────────
+# For sites that publish many events on one page as JSON-LD entities (Discover
+# Los Angeles being the canonical case). Two-step extraction:
+#   1. Parse <script type="application/ld+json"> blocks for `ItemList`-shape
+#      data with nested Event entities — gives clean title/start/end/venue/url.
+#   2. Parse the HTML cards' data-* attrs for region/neighborhood/category —
+#      these come from the publisher's editorial taxonomy and are far cleaner
+#      than the JSON-LD `addressLocality` field (which often just says
+#      "Los Angeles" with whitespace/case noise).
+# Dedupe by URL — long-running exhibitions repeat in ItemList for every day
+# the calendar shows them (60+ entries for a single 6-month run).
+import json as _json
+
+# Map Discover-LA neighborhood → our 4 zones. Source of truth for any
+# new aggregator with the same shape: extend this map (or pass `zone_map`
+# in the venue row to override).
+_DISCOVER_LA_ZONE_MAP = {
+    # Central LA
+    "Mid-Wilshire": "Central LA",
+    "Downtown": "Central LA",
+    "Hollywood": "Central LA",
+    "Arts District": "Central LA",
+    "Chinatown": "Central LA",
+    "USC": "Central LA",
+    "Mid City": "Central LA",
+    "La Brea": "Central LA",
+    "West Hollywood": "Central LA",
+    "Exposition Park": "Central LA",
+    "Historic West Adams": "Central LA",
+    "Koreatown": "Central LA",
+    "Los Feliz": "Central LA",
+    "Westlake": "Central LA",
+    "Echo Park": "Central LA",
+    "Highland Park": "Central LA",
+    "Eagle Rock": "Central LA",
+    "Silver Lake": "Central LA",
+    # Westside
+    "Brentwood": "Westside",
+    "Pacific Palisades": "Westside",
+    "Venice": "Westside",
+    "Santa Monica": "Westside",
+    "Westwood": "Westside",
+    "Beverly Hills": "Westside",
+    "Topanga": "Westside",
+    "Culver City": "Westside",
+    "Marina del Rey": "Westside",
+    # Pasadena & East
+    "Pasadena": "Pasadena & East",
+    "San Marino": "Pasadena & East",
+    "Glendale": "Pasadena & East",
+    "Burbank": "Pasadena & East",
+    "Sierra Madre": "Pasadena & East",
+    "Claremont": "Pasadena & East",
+    # Greater LA — anything else falls through to default
+}
+
+# Map publisher's editorial category → our schema's category.
+_DISCOVER_LA_DENY_CATEGORIES = frozenset({
+    "Sports",
+    "Food & Drink",
+    "Community Viewing Parties",
+    "Official Fan Zones",
+    "Official Fan Festival",
+    "World Cup Matches",
+    "Outdoors",
+    "Miscellaneous",
+})
+
+_DISCOVER_LA_CATEGORY_MAP = {
+    "Museums": "museum_exhibition",
+    "Art Shows & Galleries": "museum_exhibition",
+    "Arts & Culture": "museum_exhibition",
+    "Cultural Heritage": "museum_exhibition",
+    "Music": "concert",
+    "Music & Entertainment": "concert",
+    "Theatre": "theatre",
+    "Arts & Theatre": "theatre",
+    "Film": "film",
+    "Film, TV & Radio": "film",
+    "Comedy": "theatre",
+    "Festivals": "other",
+    "Food & Drink": "other",
+    "Sports": "other",
+    "Educational": "other",
+    "Outdoors": "other",
+}
+
+
+def _scrape_json_ld_aggregator(venue_row: dict, session=None) -> list[Event]:
+    """Aggregator parser: pulls many events from one page via JSON-LD ItemList
+    + HTML data-attrs for editorial taxonomy.
+
+    Config:
+      calendar_url: page URL
+      zone_map: optional {neighborhood: zone} override (else _DISCOVER_LA_ZONE_MAP)
+      default_zone: zone for events with no recognized neighborhood (default "Greater LA")
+    """
+    sess = session or requests
+    url = venue_row["calendar_url"]
+    try:
+        resp = sess.get(url, headers=DEFAULT_HEADERS, timeout=DEFAULT_TIMEOUT)
+        resp.raise_for_status()
+    except requests.RequestException as exc:
+        log.warning("%s: page fetch failed: %s", venue_row["id"], exc)
+        return []
+    text = resp.text
+
+    zone_map = venue_row.get("zone_map") or _DISCOVER_LA_ZONE_MAP
+    default_zone = venue_row.get("default_zone", "Greater LA")
+    cat_map = venue_row.get("category_map") or _DISCOVER_LA_CATEGORY_MAP
+    deny_cats = frozenset(venue_row.get("deny_categories") or _DISCOVER_LA_DENY_CATEGORIES)
+
+    # Step 1: build URL → (neighborhood, region, category) lookup from HTML cards.
+    # Each event-card-info anchor carries data-* attrs we trust more than the
+    # JSON-LD's addressLocality.
+    card_attrs: dict[str, dict] = {}
+    for m in re.finditer(r'<a[^>]+data-nid=\"\d+\"[^>]*>', text):
+        tag = m.group(0)
+        href_m = re.search(r'href=\"([^\"]+)\"', tag)
+        if not href_m:
+            continue
+        href = urljoin(url, href_m.group(1))
+        # First card seen wins; subsequent duplicates carry identical attrs.
+        if href in card_attrs:
+            continue
+        attrs = {}
+        for k in ("neighborhood", "region", "category", "venue", "location", "start-date"):
+            am = re.search(r'data-' + k + r'=\"([^\"]+)\"', tag)
+            if am:
+                # html-decode &amp; etc.
+                v = am.group(1).replace("&amp;", "&").replace("&#39;", "'")
+                attrs[k] = v
+        card_attrs[href] = attrs
+    log.debug("%s: %d HTML cards indexed by URL", venue_row["id"], len(card_attrs))
+
+    # Step 2: walk JSON-LD blocks. Three shapes supported:
+    #   (a) ItemList with itemListElement[] of {url, item: Event}    [Discover LA]
+    #   (b) bare Event block, one per <script>                       [Live Nation]
+    #   (c) array of Event blocks at top level                       [some CMS]
+    seen_urls: set[str] = set()
+    is_aggregator = venue_row.get("city") == "__aggregator__"
+    out: list[Event] = []
+    for block in re.findall(r'<script[^>]*type="application/ld\+json"[^>]*>(.*?)</script>', text, re.DOTALL):
+        try:
+            data = _json.loads(block)
+        except _json.JSONDecodeError:
+            continue
+        # Normalize to a list of (event_dict, url_hint) pairs. Accept any
+        # Schema.org Event subclass — MusicEvent, TheaterEvent, DanceEvent,
+        # SportsEvent, ScreeningEvent, ComedyEvent, BusinessEvent, etc.
+        def _is_event_type(t):
+            if not isinstance(t, str):
+                return False
+            return t == "Event" or t.endswith("Event")
+
+        candidates: list[tuple[dict, str | None]] = []
+        if isinstance(data, list):
+            for d in data:
+                if isinstance(d, dict) and _is_event_type(d.get("@type")):
+                    candidates.append((d, d.get("url")))
+        elif isinstance(data, dict):
+            if _is_event_type(data.get("@type")):
+                candidates.append((data, data.get("url")))
+            for li in data.get("itemListElement", []) or []:
+                if isinstance(li, dict):
+                    ev = li.get("item") or {}
+                    if isinstance(ev, dict) and _is_event_type(ev.get("@type")):
+                        candidates.append((ev, li.get("url") or ev.get("url")))
+        for ev, ev_url in candidates:
+            if not ev_url or ev_url in seen_urls:
+                continue
+            seen_urls.add(ev_url)
+
+            title = _clean_title(ev.get("name") or "")
+            start = _parse_jsonld_dt(ev.get("startDate"))
+            end = _parse_jsonld_dt(ev.get("endDate"))
+            if not title or start is None:
+                continue
+
+            # Drop obvious non-cultural noise (singles parties, pet adoptions,
+            # summer camps, etc.). Only applied to aggregators — single-venue
+            # sources are pre-curated.
+            if is_aggregator:
+                tlow = title.lower()
+                if any(d in tlow for d in _TITLE_DENY_KEYWORDS):
+                    continue
+
+            loc = ev.get("location") or {}
+            venue_name_jsonld = (loc.get("name") if isinstance(loc, dict) else None) or ""
+            venue_name = _clean_title(venue_name_jsonld) or venue_row.get("display_name") or venue_row["name"]
+
+            if is_aggregator:
+                # Per-event zoning + category from companion HTML data-attrs.
+                attrs = card_attrs.get(ev_url, {})
+                neighborhood = attrs.get("neighborhood", "")
+                zone = zone_map.get(neighborhood, default_zone)
+                raw_cat = attrs.get("category", "")
+                if raw_cat in deny_cats:
+                    continue
+                base_cat = cat_map.get(raw_cat) or venue_row.get("category", "other")
+                if base_cat == "mixed":
+                    base_cat = "other"
+                # Aggregator → venue unknown; trust title/venue keywords to refine.
+                category = _infer_category(title, venue_row, stage_default=base_cat, venue_name=venue_name)
+            else:
+                # Single-venue page (Live Nation, etc.) — trust the venue's
+                # declared category. Title keyword overlay is risky here: it
+                # false-positives on marketing copy ("cosmic opera" tour names).
+                zone = venue_row.get("city") or default_zone
+                category = venue_row.get("category", "other")
+                if category == "mixed":
+                    category = "other"
+                venue_name = venue_row.get("display_name") or venue_row["name"]
+
+            out.append(
+                Event(
+                    title=title,
+                    start=start,
+                    end=end,
+                    venue_id=venue_row["id"],
+                    venue_name=venue_name or venue_row.get("display_name") or venue_row["name"],
+                    city=zone,
+                    category=category,
+                    url=ev_url,
+                    description=None,
+                    source=venue_row["id"],
+                    audience=_infer_audience(title),
+                )
+            )
+    log.info("%s: %d unique events from json_ld_aggregator", venue_row["id"], len(out))
+    return out
+
+
+def _parse_jsonld_dt(s) -> Optional[datetime]:
+    """Parse a JSON-LD ISO-8601 datetime; return tz-aware or None."""
+    if not s or not isinstance(s, str):
+        return None
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        # JSON-LD is supposed to carry TZ; fall back to America/Los_Angeles
+        # (the page is LA-local) by treating as UTC and shifting.
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+# ─── tribe events REST API path ─────────────────────────────────────────────
+# WordPress + The Events Calendar (Tribe) plugin exposes a JSON API at
+# /wp-json/tribe/events/v1/events with paginated event records. Pasadena
+# Playhouse, AceHotel (Theatre at Ace), Pasadena Symphony, Piano Spheres all
+# expose this endpoint. Cleanest single-venue source available in LA.
+
+import html as _html
+
+
+def _scrape_tribe_rest(venue_row: dict, session=None) -> list[Event]:
+    """Walk a Tribe Events REST API, paginating until exhausted.
+
+    Config:
+      calendar_url: REST endpoint (typically `.../wp-json/tribe/events/v1/events?per_page=100`)
+      filter_venue_substring: optional — keep events whose `venue.venue` contains this string
+        (used by aggregator hosts like AceHotel that mix multiple programs).
+      max_pages: safety cap (default 30)
+    """
+    sess = session or requests
+    base_url = venue_row["calendar_url"]
+    sep = "&" if "?" in base_url else "?"
+    if "per_page=" not in base_url:
+        base_url = f"{base_url}{sep}per_page=100"
+        sep = "&"
+
+    venue_filter = venue_row.get("filter_venue_substring")
+    max_pages = int(venue_row.get("max_pages", 30))
+    out: list[Event] = []
+    seen_urls: set[str] = set()
+
+    for page in range(1, max_pages + 1):
+        page_url = f"{base_url}{sep}page={page}"
+        try:
+            r = sess.get(page_url, headers=DEFAULT_HEADERS, timeout=DEFAULT_TIMEOUT)
+            r.raise_for_status()
+            data = r.json()
+        except (requests.RequestException, ValueError) as exc:
+            log.warning("%s: tribe_rest fetch failed page=%d: %s", venue_row["id"], page, exc)
+            break
+        events = data.get("events") or []
+        if not events:
+            break
+        for raw in events:
+            ev = _tribe_to_event(raw, venue_row, venue_filter=venue_filter)
+            if ev is None:
+                continue
+            if ev.url in seen_urls:
+                continue
+            seen_urls.add(ev.url)
+            out.append(ev)
+        if page >= int(data.get("total_pages") or 1):
+            break
+
+    log.info("%s: %d events from tribe_rest", venue_row["id"], len(out))
+    return out
+
+
+def _tribe_to_event(raw: dict, venue_row: dict, venue_filter: str | None = None) -> Optional[Event]:
+    """Map one Tribe REST record to a canonical Event."""
+    title = raw.get("title") or ""
+    if not title:
+        return None
+    title = _clean_title(_html_decode(title))
+    if not title:
+        return None
+
+    # Optional venue scoping for aggregator hosts.
+    if venue_filter:
+        venue_obj = raw.get("venue")
+        if isinstance(venue_obj, dict):
+            vname = venue_obj.get("venue") or ""
+        elif isinstance(venue_obj, list) and venue_obj:
+            vname = venue_obj[0].get("venue", "") if isinstance(venue_obj[0], dict) else ""
+        else:
+            vname = ""
+        if venue_filter.lower() not in vname.lower():
+            return None
+
+    start = _parse_tribe_dt(raw.get("utc_start_date") or raw.get("start_date"))
+    end = _parse_tribe_dt(raw.get("utc_end_date") or raw.get("end_date"))
+    if start is None:
+        return None
+
+    url = raw.get("url") or venue_row.get("homepage", "#")
+    venue_obj = raw.get("venue")
+    venue_name = ""
+    if isinstance(venue_obj, dict):
+        venue_name = _html_decode(venue_obj.get("venue") or "")
+    venue_name = venue_name or venue_row.get("display_name") or venue_row["name"]
+
+    # Single-venue source: trust the venue's declared category. Title overlay
+    # is risky for the same reason as the json_ld single-venue path.
+    category = venue_row.get("category", "other")
+    if category == "mixed":
+        category = "other"
+    return Event(
+        title=title,
+        start=start,
+        end=end,
+        venue_id=venue_row["id"],
+        venue_name=venue_name,
+        city=venue_row.get("city", ""),
+        category=category,
+        url=url,
+        description=None,
+        source=venue_row["id"],
+        audience=_infer_audience(title),
+    )
+
+
+def _parse_tribe_dt(s) -> Optional[datetime]:
+    """Parse Tribe REST datetime ('YYYY-MM-DD HH:MM:SS', UTC if from utc_*)."""
+    if not s or not isinstance(s, str):
+        return None
+    try:
+        # Tribe utc_* fields are UTC; non-utc are local. We treat utc_* as UTC.
+        dt = datetime.fromisoformat(s.replace(" ", "T"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+# Marketing-ribbon suffixes Tribe sites bake into the title via
+# <span class="orange-sm-caps">. Strip these — the title field should be
+# the show name, not a status badge.
+_TITLE_RIBBONS = re.compile(
+    r"\s*(?:SELLING\s+FAST|SOLD\s+OUT|FEW\s+TICKETS\s+LEFT|"
+    r"ON\s+SALE\s+NOW|JUST\s+ANNOUNCED|FINAL\s+WEEK|EXTENDED|NEW\s+DATE)\s*$",
+    re.IGNORECASE,
+)
+
+
+def _html_decode(s: str) -> str:
+    """Decode HTML entities + strip embedded tags + trailing marketing ribbons."""
+    if not s:
+        return ""
+    s = _html.unescape(s)
+    s = re.sub(r"<[^>]+>", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    for _ in range(3):  # several ribbons can stack
+        new = _TITLE_RIBBONS.sub("", s)
+        if new == s:
+            break
+        s = new.strip()
+    return s
 
 
 def _coerce_to_dt(v) -> Optional[datetime]:
@@ -785,10 +1186,24 @@ def _parse_one(text: str, explicit_format: Optional[str] = None) -> Optional[dat
 
 _CATEGORY_KEYWORDS = [
     ("vernissage", ["opening reception", "opening night", "vernissage"]),
-    # "opera" alone is risky (could match "soap opera"); require word-boundary
-    # context via the venue's stage_resolver default_category instead.
-    ("opera", ["opera", "operetta"]),
-    ("ballet", ["ballet", "swan lake", "nutcracker", "giselle", "coppelia"]),
+    ("opera", [
+        "opera", "operetta",
+        # Verdi
+        "falstaff", "aida", "rigoletto", "otello", "la traviata", "il trovatore", "nabucco",
+        # Puccini
+        "tosca", "la bohème", "la boheme", "madama butterfly", "turandot", "gianni schicchi",
+        # Mozart
+        "magic flute", "don giovanni", "cosi fan tutte", "marriage of figaro", "le nozze",
+        # Bizet / Rossini / Donizetti / Strauss / Wagner / Handel
+        "carmen", "barber of seville", "elixir of love", "lucia di lammermoor",
+        "der rosenkavalier", "salome", "elektra", "die walküre", "tannhäuser", "lohengrin",
+        "ring cycle", "tristan und isolde", "parsifal", "fidelio",
+    ]),
+    ("ballet", [
+        "ballet", "swan lake", "nutcracker", "sleeping beauty", "giselle", "coppelia",
+        "don quixote", "la sylphide", "la bayadère", "la bayadere", "petrushka",
+        "rite of spring", "raymonda", "sylvia", "spartacus",
+    ]),
     ("concert", [
         "symphony", "concerto", "philharmonic", "chamber music",
         "recital", "lieder", "orchestra", "string quartet",
@@ -798,6 +1213,124 @@ _CATEGORY_KEYWORDS = [
     ("film", ["screening", "film festival", "70mm", "imax", "double feature"]),
     ("museum_exhibition", ["exhibition", "exhibit", "retrospective"]),
 ]
+
+
+# Famous musicals — titles literally contain "opera"/"ballet" but they're
+# musical theatre, not opera/ballet. Tag them as theatre.
+_MUSICAL_THEATRE_TITLES = (
+    "phantom of the opera",
+    "les misérables", "les miserables",
+    "miss saigon",
+    "evita",
+    "jesus christ superstar",
+    "the lion king",
+    "wicked",
+    "hamilton",
+    "hadestown",
+    "cabaret",
+    "chicago",
+    "rent",
+    "company",  # Sondheim
+    "into the woods",
+    "sweeney todd",
+)
+
+
+# Venue-name → category overrides. Catches LA Opera productions at Dorothy
+# Chandler Pavilion (venue name doesn't say "opera"), American Contemporary
+# Ballet, etc. Matched case-insensitively as substring.
+_VENUE_NAME_CATEGORY: list[tuple[str, str]] = [
+    # opera
+    ("dorothy chandler pavilion", "opera"),  # LA Opera's home
+    ("la opera", "opera"),
+    ("los angeles opera", "opera"),
+    ("pacific opera project", "opera"),
+    ("long beach opera", "opera"),
+    # ballet
+    ("american contemporary ballet", "ballet"),
+    ("los angeles ballet", "ballet"),
+    # famous LA theatres — Discover LA tags these as "Music" or "Other";
+    # the venue itself tells us they're theatre programming.
+    ("pantages theatre", "theatre"),
+    ("ahmanson theatre", "theatre"),
+    ("mark taper forum", "theatre"),
+    ("kirk douglas theatre", "theatre"),
+    ("geffen playhouse", "theatre"),
+    ("pasadena playhouse", "theatre"),
+    ("boston court", "theatre"),
+    ("a noise within", "theatre"),
+    ("latino theater company", "theatre"),
+    ("los angeles theatre center", "theatre"),
+    ("santa monica playhouse", "theatre"),
+    ("east west players", "theatre"),
+    ("rogue machine", "theatre"),
+    ("antaeus theatre", "theatre"),
+    ("skylight theatre", "theatre"),
+    # famous LA concert venues
+    ("hollywood bowl", "concert"),
+    ("walt disney concert hall", "concert"),  # default; opera/ballet titles still overlay first
+    ("greek theatre", "concert"),
+    ("the wiltern", "concert"),
+    ("wiltern theatre", "concert"),
+    ("hollywood palladium", "concert"),
+    # museums
+    ("lacma", "museum_exhibition"),
+    ("the broad", "museum_exhibition"),
+    ("hammer museum", "museum_exhibition"),
+    ("getty center", "museum_exhibition"),
+    ("getty villa", "museum_exhibition"),
+    ("norton simon", "museum_exhibition"),
+    ("huntington library", "museum_exhibition"),
+    ("academy museum", "museum_exhibition"),
+    ("autry museum", "museum_exhibition"),
+    ("japanese american national museum", "museum_exhibition"),
+    ("natural history museum", "museum_exhibition"),
+    ("la brea tar pits", "museum_exhibition"),
+    # cinemas
+    ("american cinematheque", "film"),
+    ("egyptian theatre", "film"),
+    ("aero theatre", "film"),
+    ("vidiots", "film"),
+    ("new beverly cinema", "film"),
+]
+
+
+# Title-substring deny list. Discover LA includes singles parties, pet
+# adoptions, summer camps, brunch cruises, etc. — not cultural events.
+# Matched case-insensitively as substring on the title.
+_TITLE_DENY_KEYWORDS = (
+    "singles party",
+    "singles night",
+    "singles social",
+    "swipe right",
+    "speed dating",
+    "speed-dating",
+    "pet adoption",
+    "summer camp",
+    "summer theatre camp",
+    "spring camp",
+    "winter camp",
+    "kids camp",
+    "brunch cruise",
+    "dinner cruise",
+    "happy hour",
+    "wine tasting",
+    "beer tasting",
+    "yoga class",
+    "boot camp",
+    "trivia night",
+    "trivia ",
+    "bingo night",
+    "karaoke",
+    "open mic",
+    "free workshop",
+    "career fair",
+    "job fair",
+    "book signing",  # not strictly junk; high-volume + low cultural signal
+    "story time",
+    "story hour",
+    "storytime",
+)
 
 
 # ─── audience inference ──────────────────────────────────────────────────────
@@ -879,24 +1412,45 @@ def _infer_audience(title: str) -> str:
     return "general"
 
 
-def _infer_category(title: str, venue_row: dict, stage_default: Optional[str] = None) -> str:
+def _infer_category(title: str, venue_row: dict, stage_default: Optional[str] = None,
+                    venue_name: Optional[str] = None) -> str:
     """Resolve event category. Priority:
 
-    1. per-venue category_keyword_overrides — venue-curated, beats global keywords
-       (used for production-name overrides like Aalto's "Relations" / "Ptah VI" being ballet)
-    2. global title keyword match (Mozart/Sinfonie/Schwanensee/etc.)
-    3. stage_default from stage_resolver rule
-    4. venue's base category if not 'mixed'
-    5. 'other'
+    1. per-venue category_keyword_overrides
+    2. famous-musical override (Phantom of the Opera → theatre, not opera)
+    3. global title keyword match — word-boundary on opera/ballet so
+       "Operation" / "operational" don't false-positive
+    4. venue-name override (e.g. Dorothy Chandler Pavilion → opera) — only
+       fires when title gave us nothing more specific; this matters because
+       "New York City Ballet AT Dorothy Chandler" must stay ballet, not opera
+    5. stage_default from stage_resolver rule
+    6. venue's base category if not 'mixed'
+    7. 'other'
     """
     t = title.lower()
     overrides = venue_row.get("category_keyword_overrides") or {}
     for cat, kws in overrides.items():
         if any(kw.lower() in t for kw in (kws or [])):
             return cat
+    # 2. Famous musicals — title-contains check that beats opera keyword.
+    if any(m in t for m in _MUSICAL_THEATRE_TITLES):
+        return "theatre"
+    # 3. Title keyword match.
     for cat, kws in _CATEGORY_KEYWORDS:
-        if any(kw in t for kw in kws):
-            return cat
+        for kw in kws:
+            # opera/ballet → word-boundary regex; everything else stays substring
+            # (multi-word phrases like "swan lake" handle their own boundaries).
+            if cat in ("opera", "ballet") and " " not in kw:
+                if re.search(rf"\b{re.escape(kw)}\b", t):
+                    return cat
+            elif kw in t:
+                return cat
+    # 4. Venue-name override.
+    if venue_name:
+        vn = venue_name.lower()
+        for needle, cat in _VENUE_NAME_CATEGORY:
+            if needle in vn:
+                return cat
     if stage_default:
         return stage_default
     base = (venue_row.get("category") or "").lower()
