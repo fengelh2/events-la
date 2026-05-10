@@ -225,37 +225,78 @@
   city: Central LA
   category: concert
   homepage: https://www.laphil.com
-  calendar_url: https://www.laphil.com/events/performances
-  kind: unknown
+  calendar_url: https://www.laphil.com/events/feed/live
+  kind: flat_json_feed
   source_priority: 0
+  title_path: program.name
+  start_path: start_time
+  url_path: absolute_url
+  venue_path: venue.name
+  filter_field: venue.name
+  filter_value: Walt Disney Concert Hall
+  categories_path: categories
   notes: |
-    DTLA (Central LA). Tessitura signal present; main calendar uses lazy-
-    loaded performance cards (only 2 visible without JS). Onboard via
-    Tessitura TNEW adapter once built (also unlocks LA Opera, CTG, Wallis,
-    Geffen).
+    Walt Disney Concert Hall (DTLA / Central LA). LA Phil's public events
+    feed at /events/feed/live returns 580 future events across LA Phil,
+    Hollywood Bowl, and The Ford. We fetch the whole feed and filter by
+    venue.name. Disney Hall yields ~172 performances. Discovered 2026-05-10.
 
 - id: la-opera
   name: LA Opera
   city: Central LA
   category: opera
   homepage: https://www.laopera.org
-  calendar_url: https://www.laopera.org/whats-on
-  kind: unknown
+  calendar_url: https://www.laopera.org/whats-on/by-date
+  kind: algolia_calendar
   source_priority: 0
-  notes: DTLA (Central LA). Tessitura — same adapter strategy as LA Phil.
+  algolia_app_id: N660Y9I1F8
+  algolia_api_key: 941081c330d3700e385d5d1a53ad150a
+  algolia_index: prod_laopera_calendar
+  notes: |
+    DTLA Music Center (Dorothy Chandler Pavilion + Zipper Hall + others).
+    Tessitura backend, Kentico CMS, Algolia search index. The page's React
+    app POSTs to {APP_ID}-dsn.algolia.net with the index name above; the
+    same call works for us directly. ~61 performances/season. Public search
+    key (used by the page's own JS). Discovered 2026-05-10 via Playwright
+    network-trace.
 
 - id: hollywood-bowl
   name: Hollywood Bowl
   city: Central LA
   category: concert
   homepage: https://www.hollywoodbowl.com
-  calendar_url: https://www.hollywoodbowl.com/events/performances
-  kind: unknown
+  calendar_url: https://www.laphil.com/events/feed/live
+  kind: flat_json_feed
   source_priority: 0
+  title_path: program.name
+  start_path: start_time
+  url_path: absolute_url
+  venue_path: venue.name
+  filter_field: venue.name
+  filter_value: Hollywood Bowl
+  categories_path: categories
   notes: |
-    Hollywood (Central LA). Same Tessitura tenant as LA Phil (LA Phil
-    presents Bowl summer season). Summer-only programming. Same TNEW
-    adapter once built.
+    Hollywood (Central LA). LA Phil presents the Bowl summer season; both
+    venues share the /events/feed/live endpoint on laphil.com. ~402 events.
+
+- id: the-ford
+  name: The Ford
+  city: Central LA
+  category: concert
+  homepage: https://www.theford.com
+  calendar_url: https://www.laphil.com/events/feed/live
+  kind: flat_json_feed
+  source_priority: 0
+  title_path: program.name
+  start_path: start_time
+  url_path: absolute_url
+  venue_path: venue.name
+  filter_field: venue.name
+  filter_value: The Ford
+  categories_path: categories
+  notes: |
+    Hollywood (Central LA). LA Phil-presented amphitheatre in the Cahuenga
+    Pass. Shares LA Phil's feed. ~6 events.
 
 - id: ctg
   name: Center Theatre Group (Mark Taper / Ahmanson / Kirk Douglas)

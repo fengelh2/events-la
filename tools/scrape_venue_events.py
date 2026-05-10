@@ -87,6 +87,10 @@ def scrape(venue_row: dict, session: Optional[requests.Session] = None) -> list[
             events = _scrape_json_ld_aggregator(venue_row, session=session)
         elif kind == "tribe_rest":
             events = _scrape_tribe_rest(venue_row, session=session)
+        elif kind == "algolia_calendar":
+            events = _scrape_algolia_calendar(venue_row, session=session)
+        elif kind == "flat_json_feed":
+            events = _scrape_flat_json_feed(venue_row, session=session)
         elif kind == "unknown":
             log.info("skip %s: kind=unknown (pending onboarding)", venue_id)
             return []
@@ -578,6 +582,309 @@ def _tribe_to_event(raw: dict, venue_row: dict, venue_filter: str | None = None)
         source=venue_row["id"],
         audience=_infer_audience(title),
     )
+
+
+# ─── Algolia calendar API path ──────────────────────────────────────────────
+# Tessitura-on-Kentico venues (LA Opera, LA Phil, Hollywood Bowl, ...) expose
+# their performance schedule via an Algolia search index. The React app on
+# /whats-on (or /events/performances) sends a POST to:
+#   https://<APP_ID>-dsn.algolia.net/1/indexes/*/queries
+#   ?x-algolia-api-key=<KEY>&x-algolia-application-id=<APP_ID>
+# Body: {"requests":[{"indexName":"<INDEX>","params":"<urlencoded params>"}]}
+# Response hit shape: {Title, SubTitle, Venue, StartDate (ms),
+# PerformanceDates [ms], PrimaryCategory, KenticoUrl, ...}
+# The API key is public (used by the page's own JS); no auth required.
+
+from urllib.parse import urlencode
+
+
+def _scrape_algolia_calendar(venue_row: dict, session=None) -> list[Event]:
+    """Fetch performances from an Algolia-indexed Tessitura calendar.
+
+    Config:
+      algolia_app_id       — Algolia application ID
+      algolia_api_key      — public search-only API key (from the page's JS)
+      algolia_index        — index name (e.g. prod_laopera_calendar)
+      algolia_filters      — Algolia `filters` param (default: ItemType:Performance
+                             AND ExcludeFromCalendar:false)
+      algolia_hits_per_page — int (default 200; max usually 1000)
+      origin               — for the Origin header (default: venue homepage)
+      url_prefix           — prefix for KenticoUrl when it's a relative path
+                             (default: venue homepage)
+    """
+    sess = session or requests
+    app_id = venue_row.get("algolia_app_id")
+    api_key = venue_row.get("algolia_api_key")
+    index = venue_row.get("algolia_index")
+    if not (app_id and api_key and index):
+        log.warning("%s: algolia_calendar missing app_id/api_key/index", venue_row["id"])
+        return []
+
+    filters = venue_row.get(
+        "algolia_filters",
+        "ExcludeFromCalendar:false AND ItemType:Performance",
+    )
+    hits_per_page = int(venue_row.get("algolia_hits_per_page", 200))
+    origin = venue_row.get("origin") or venue_row.get("homepage", "")
+    url_prefix = venue_row.get("url_prefix") or venue_row.get("homepage", "")
+
+    endpoint = f"https://{app_id.lower()}-dsn.algolia.net/1/indexes/*/queries"
+    out: list[Event] = []
+    seen_keys: set[tuple] = set()
+
+    for page in range(0, 20):  # safety cap
+        params_str = urlencode({
+            "filters": filters,
+            "hitsPerPage": hits_per_page,
+            "page": page,
+        })
+        body = {"requests": [{"indexName": index, "params": params_str}]}
+        try:
+            r = sess.post(
+                endpoint,
+                params={
+                    "x-algolia-api-key": api_key,
+                    "x-algolia-application-id": app_id,
+                },
+                json=body,
+                headers={
+                    **DEFAULT_HEADERS,
+                    "Content-Type": "application/json",
+                    "Origin": origin,
+                    "Referer": origin + "/",
+                },
+                timeout=DEFAULT_TIMEOUT,
+            )
+            r.raise_for_status()
+            data = r.json()
+        except (requests.RequestException, ValueError) as exc:
+            log.warning("%s: algolia query page=%d failed: %s", venue_row["id"], page, exc)
+            break
+        results = data.get("results") or []
+        if not results:
+            break
+        hits = results[0].get("hits") or []
+        nb_pages = int(results[0].get("nbPages") or 1)
+        if not hits:
+            break
+        for h in hits:
+            ev = _algolia_hit_to_event(h, venue_row, url_prefix=url_prefix)
+            if ev is None:
+                continue
+            key = (ev.title, ev.start, ev.venue_name)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            out.append(ev)
+        if page + 1 >= nb_pages:
+            break
+
+    log.info("%s: %d events from algolia_calendar", venue_row["id"], len(out))
+    return out
+
+
+_ALGOLIA_PRIMARY_CATEGORY_MAP = {
+    "Operas": "opera",
+    "Opera": "opera",
+    "Concerts & Recitals": "concert",
+    "Concerts": "concert",
+    "Symphony": "concert",
+    "Chamber Music": "concert",
+    "Ballet": "ballet",
+    "Dance": "ballet",
+    "Theatre": "theatre",
+    "Theater": "theatre",
+    "Plays": "theatre",
+    "Musicals": "theatre",
+    "Film": "film",
+    "Screenings": "film",
+    "Exhibition": "museum_exhibition",
+    "Exhibitions": "museum_exhibition",
+    "Talks & Lectures": "other",
+    "Educational": "other",
+    "Family": "other",
+}
+
+
+def _algolia_hit_to_event(h: dict, venue_row: dict, url_prefix: str = "") -> Optional[Event]:
+    """Map one Algolia calendar hit to a canonical Event."""
+    title = _clean_title(_html_decode(h.get("Title") or ""))
+    if not title:
+        return None
+    start_ms = h.get("StartDate")
+    end_ms = h.get("EndDate")
+    if not isinstance(start_ms, (int, float)) or start_ms <= 0:
+        # Some hits carry only PerformanceDates[] instead of StartDate.
+        dates = h.get("PerformanceDates") or []
+        if dates:
+            start_ms = dates[0]
+        else:
+            return None
+    start = datetime.fromtimestamp(start_ms / 1000, tz=timezone.utc)
+    end = datetime.fromtimestamp(end_ms / 1000, tz=timezone.utc) if isinstance(end_ms, (int, float)) and end_ms > 0 else None
+
+    venue_name = _clean_title(_html_decode(h.get("Venue") or "")) or (
+        venue_row.get("display_name") or venue_row["name"]
+    )
+    rel_url = h.get("KenticoUrl") or ""
+    if rel_url.startswith("/") and url_prefix:
+        url = url_prefix.rstrip("/") + rel_url
+    elif rel_url.startswith("http"):
+        url = rel_url
+    else:
+        url = venue_row.get("homepage", "#")
+
+    # Category resolution for Algolia hits:
+    #   1. Algolia's PrimaryCategory (most reliable — the venue's own taxonomy)
+    #   2. Title-keyword overlay (for opera/ballet productions)
+    #   3. Venue-name override
+    #   4. Row default
+    primary_cat = h.get("PrimaryCategory") or ""
+    algolia_cat = _ALGOLIA_PRIMARY_CATEGORY_MAP.get(primary_cat.strip())
+    if algolia_cat:
+        category = algolia_cat
+    else:
+        base_cat = venue_row.get("category", "other")
+        if base_cat == "mixed":
+            base_cat = "other"
+        category = _infer_category(title, venue_row, stage_default=base_cat, venue_name=venue_name)
+
+    return Event(
+        title=title,
+        start=start,
+        end=end,
+        venue_id=venue_row["id"],
+        venue_name=venue_name,
+        city=venue_row.get("city", ""),
+        category=category,
+        url=url,
+        description=None,
+        source=venue_row["id"],
+        audience=_infer_audience(title),
+    )
+
+
+# ─── flat JSON feed path ────────────────────────────────────────────────────
+# Many venues expose a single JSON endpoint that returns a flat array of
+# event objects. LA Phil's /events/feed/live is the canonical example:
+# 580 events spanning Hollywood Bowl + Walt Disney Concert Hall + The Ford,
+# each with start_time / venue.name / site.name / program.name / absolute_url.
+# This parser supports field-path mapping + optional filtering by a sub-venue
+# field (so one URL can be split into 3 venue rows for the calendar's
+# venue-chip filter).
+
+
+def _dig(obj, path: str):
+    """Read a dotted path from a nested dict (e.g. 'venue.name'). Returns None
+    on missing key. List indexing not supported (not needed yet)."""
+    if not path:
+        return None
+    cur = obj
+    for key in path.split("."):
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(key)
+        if cur is None:
+            return None
+    return cur
+
+
+def _scrape_flat_json_feed(venue_row: dict, session=None) -> list[Event]:
+    """Fetch + parse a flat JSON-array event feed.
+
+    Config:
+      calendar_url: URL returning a JSON array of event records
+      title_path: dot-path to title (default 'title')
+      start_path: dot-path to start time (ISO 8601 string; default 'start_time')
+      end_path: dot-path to end time (optional)
+      url_path: dot-path to detail URL (optional)
+      venue_path: dot-path to venue name (optional)
+      filter_field: dot-path to filter on (e.g. 'venue.name')
+      filter_value: substring match against filter_field (case-insensitive)
+      categories_path: dot-path to list of category objects (each {name: ...});
+                       names get joined for category-keyword matching
+    """
+    sess = session or requests
+    url = venue_row["calendar_url"]
+    try:
+        r = sess.get(url, headers=DEFAULT_HEADERS, timeout=DEFAULT_TIMEOUT)
+        r.raise_for_status()
+        data = r.json()
+    except (requests.RequestException, ValueError) as exc:
+        log.warning("%s: feed fetch failed: %s", venue_row["id"], exc)
+        return []
+    if not isinstance(data, list):
+        # Sometimes the feed nests the array under a key.
+        for key in ("events", "data", "results", "items"):
+            if isinstance(data, dict) and isinstance(data.get(key), list):
+                data = data[key]
+                break
+        else:
+            log.warning("%s: feed response is not a list", venue_row["id"])
+            return []
+
+    title_path = venue_row.get("title_path", "title")
+    start_path = venue_row.get("start_path", "start_time")
+    end_path = venue_row.get("end_path")
+    url_path = venue_row.get("url_path")
+    venue_path = venue_row.get("venue_path")
+    cats_path = venue_row.get("categories_path")
+    filter_field = venue_row.get("filter_field")
+    filter_value = (venue_row.get("filter_value") or "").lower()
+
+    out: list[Event] = []
+    seen_urls: set[str] = set()
+    for raw in data:
+        if not isinstance(raw, dict):
+            continue
+        if filter_field and filter_value:
+            field_val = (_dig(raw, filter_field) or "")
+            if filter_value not in str(field_val).lower():
+                continue
+        title = _clean_title(_html_decode(_dig(raw, title_path) or ""))
+        if not title:
+            continue
+        start = _parse_jsonld_dt(_dig(raw, start_path))
+        if start is None:
+            continue
+        end = _parse_jsonld_dt(_dig(raw, end_path)) if end_path else None
+        url_val = _dig(raw, url_path) if url_path else None
+        url_str = url_val if isinstance(url_val, str) else venue_row.get("homepage", "#")
+        if url_str in seen_urls:
+            continue
+        seen_urls.add(url_str)
+
+        venue_name = _clean_title(_html_decode(_dig(raw, venue_path) or "")) if venue_path else ""
+        venue_name = venue_name or venue_row.get("display_name") or venue_row["name"]
+
+        # Category — concatenate any tag/category names + title for keyword pass.
+        category_hints = title
+        if cats_path:
+            cats = _dig(raw, cats_path) or []
+            if isinstance(cats, list):
+                names = [c.get("name") for c in cats if isinstance(c, dict) and c.get("name")]
+                category_hints = title + " " + " ".join(names)
+        base_cat = venue_row.get("category", "other")
+        if base_cat == "mixed":
+            base_cat = "other"
+        category = _infer_category(category_hints, venue_row, stage_default=base_cat, venue_name=venue_name)
+
+        out.append(Event(
+            title=title,
+            start=start,
+            end=end,
+            venue_id=venue_row["id"],
+            venue_name=venue_name,
+            city=venue_row.get("city", ""),
+            category=category,
+            url=url_str,
+            description=None,
+            source=venue_row["id"],
+            audience=_infer_audience(title),
+        ))
+
+    log.info("%s: %d events from flat_json_feed", venue_row["id"], len(out))
+    return out
 
 
 def _parse_tribe_dt(s) -> Optional[datetime]:
