@@ -1,0 +1,296 @@
+# events-la — venue master list
+#
+# Each entry is one source. Geographic scope: LA proper + Greater LA County.
+# Use `city` field for NEIGHBORHOOD (DTLA, Hollywood, Westside, Pasadena, etc.)
+# rather than literal city — the dynamic Where filter chips show whatever
+# values appear in the data.
+#
+# Status: tier-1 onboarded 2026-05-10. ~6 venues to start; expand from
+# Recommended Onboarding Order list in CLAUDE.md as needed.
+
+# ============================================================================
+# DOWNTOWN LA (DTLA)
+# ============================================================================
+
+- id: lacma
+  name: LACMA
+  city: Mid-Wilshire
+  category: museum_exhibition
+  homepage: https://www.lacma.org
+  calendar_url: https://www.lacma.org/events-calendar
+  kind: html_list
+  source_priority: 0
+  selectors:
+    item: ".card-event"
+    title: ".card-event__title"
+    date: ".card-event__date"
+    detail_link: "a.card-event__link"
+  notes: |
+    LA County Museum of Art. Server-rendered .card-event cards on the
+    /events-calendar page. Date format observed: "Sun, May 10, 7:30 pm" or
+    "May 13–Aug 17". Selectors to be adjusted on first scrape.
+
+# ============================================================================
+# WESTSIDE — Hammer + Getty cluster
+# ============================================================================
+
+- id: hammer
+  name: Hammer Museum
+  city: Westwood
+  category: museum_exhibition
+  homepage: https://hammer.ucla.edu
+  calendar_url: https://hammer.ucla.edu/programs-events
+  kind: html_list
+  source_priority: 0
+  selectors:
+    item: ".result-item--program"
+    title: ".result-item__title"
+    date: ".result-item__date"
+    detail_link: "a.result-item__link"
+  notes: |
+    Per agent recon: paged via ?start_date=MM/DD/YYYY query string. Modal
+    architecture; primary listing has ~10 events visible per page. Selectors
+    based on observed `result-item--program` class — verify on first scrape.
+
+- id: getty
+  name: The Getty
+  city: Brentwood
+  category: museum_exhibition
+  homepage: https://www.getty.edu
+  calendar_url: https://www.getty.edu/visit/cal/
+  kind: html_list
+  source_priority: 0
+  selectors:
+    item: ".calendar-event"
+    title: ".calendar-event__title"
+    date: ".calendar-event__date"
+    detail_link: "a.calendar-event__link"
+  notes: |
+    Single calendar covers Getty Center + Getty Villa. ~21 server-rendered
+    tiles per page. Selectors based on agent recon — adjust if first scrape
+    fails. Most events are talks, tours, gallery walks (audience filter
+    catches "Family Workshop" / "kids" automatically).
+
+# ============================================================================
+# PASADENA
+# ============================================================================
+
+- id: pasadena-playhouse
+  name: Pasadena Playhouse
+  city: Pasadena
+  category: theatre
+  homepage: https://pasadenaplayhouse.org
+  calendar_url: https://pasadenaplayhouse.org/wp-json/tribe/events/v1/events?per_page=100
+  kind: unknown          # NEEDS new "tribe_rest" kind in scraper — defer until built
+  source_priority: 0
+  notes: |
+    Tribe Events REST API exposed — n=57 events with title/start_date/end_date/
+    url/venue. Cleanest single-venue source in LA. Need to add a `kind:
+    tribe_rest` parser path that fetches the JSON, walks `data[].title`
+    and `data[].start_date` (wall-clock America/Los_Angeles, not UTC).
+
+- id: norton-simon
+  name: Norton Simon Museum
+  city: Pasadena
+  category: museum_exhibition
+  homepage: https://www.nortonsimon.org
+  calendar_url: https://www.nortonsimon.org/events
+  kind: unknown
+  source_priority: 0
+  notes: |
+    Tier-2; not yet probed. Onboard after the Tier-1 four are stable.
+
+# ============================================================================
+# AGGREGATOR — highest priority
+# ============================================================================
+
+- id: discover-los-angeles
+  name: Discover Los Angeles
+  city: __aggregator__
+  category: mixed
+  homepage: https://www.discoverlosangeles.com
+  calendar_url: https://www.discoverlosangeles.com/events
+  kind: unknown          # needs a JSON-LD walker — defer until built
+  source_priority: 5
+  notes: |
+    600+ JSON-LD `@type:Event` entities on a single page, server-rendered.
+    Drupal site. Should be onboarded FIRST — seeds the calendar with hundreds
+    of cross-venue events on day one. Need a `kind: json_ld_aggregator` parser
+    path that extracts JSON-LD blocks via extruct or regex, walks each Event,
+    and tags `city` from the location.address.addressLocality field.
+
+# ============================================================================
+# DEFERRED — TIER-1 venues pending parser features
+# ============================================================================
+# Not onboarded yet because they need parser features beyond the current
+# kinds. Listed here for future onboarding.
+
+- id: la-philharmonic
+  name: LA Philharmonic — Walt Disney Concert Hall
+  city: DTLA
+  category: concert
+  homepage: https://www.laphil.com
+  calendar_url: https://www.laphil.com/events/performances
+  kind: unknown
+  source_priority: 0
+  notes: |
+    Tessitura signal present; main calendar uses lazy-loaded performance
+    cards (only 2 visible without JS). Onboard via Tessitura TNEW adapter
+    once built (also unlocks LA Opera, CTG, Wallis, Geffen).
+
+- id: la-opera
+  name: LA Opera
+  city: DTLA
+  category: opera
+  homepage: https://www.laopera.org
+  calendar_url: https://www.laopera.org/whats-on
+  kind: unknown
+  source_priority: 0
+  notes: Tessitura — same adapter strategy as LA Phil.
+
+- id: hollywood-bowl
+  name: Hollywood Bowl
+  city: Hollywood
+  category: concert
+  homepage: https://www.hollywoodbowl.com
+  calendar_url: https://www.hollywoodbowl.com/events/performances
+  kind: unknown
+  source_priority: 0
+  notes: |
+    Same Tessitura tenant as LA Phil (LA Phil presents Bowl summer season).
+    Summer-only programming. Same TNEW adapter once built.
+
+- id: ctg
+  name: Center Theatre Group (Mark Taper / Ahmanson / Kirk Douglas)
+  city: DTLA
+  category: theatre
+  homepage: https://www.centertheatregroup.org
+  kind: unknown
+  source_priority: 0
+  notes: |
+    queue-it bot wall blocks plain HTTP. Will require Playwright OR the
+    Tessitura subdomain (my.centertheatregroup.org) once probed.
+
+- id: geffen-playhouse
+  name: Geffen Playhouse
+  city: Westwood
+  category: theatre
+  homepage: https://www.geffenplayhouse.org
+  kind: unknown
+  source_priority: 0
+  notes: Tessitura at my.geffenplayhouse.org.
+
+- id: wallis-annenberg
+  name: Wallis Annenberg Center for the Performing Arts
+  city: Beverly Hills
+  category: mixed
+  homepage: https://thewallis.org
+  calendar_url: https://thewallis.org/events
+  kind: unknown
+  source_priority: 0
+  notes: |
+    Tessitura confirmed at tickets.thewallis.org with TNEW v15+ template.
+    The `tn-event-listing-view` HTML is structured and scrapeable — would
+    be the first venue to use the planned TNEW adapter.
+
+- id: american-cinematheque
+  name: American Cinematheque (Egyptian / Aero / Los Feliz)
+  city: Hollywood
+  category: film
+  homepage: https://americancinematheque.com
+  calendar_url: https://americancinematheque.com/feed/
+  kind: unknown
+  source_priority: 0
+  notes: |
+    WordPress RSS feed live. Need a `kind: rss` parser path (parse
+    `<item>` elements, extract title + pubDate + link). Easy add; haven't
+    built it yet because momEvents didn't need it.
+
+- id: the-broad
+  name: The Broad
+  city: DTLA
+  category: museum_exhibition
+  homepage: https://www.thebroad.org
+  kind: unknown
+  source_priority: 0
+  notes: Free-admission contemporary; ticketed events.
+
+- id: moca
+  name: MOCA (Grand Avenue + Geffen Contemporary)
+  city: DTLA
+  category: museum_exhibition
+  homepage: https://www.moca.org
+  kind: unknown
+  source_priority: 0
+
+- id: huntington
+  name: The Huntington Library, Art Museum, and Botanical Gardens
+  city: San Marino
+  category: museum_exhibition
+  homepage: https://www.huntington.org
+  kind: unknown
+  source_priority: 0
+
+- id: skirball
+  name: Skirball Cultural Center
+  city: Sepulveda Pass
+  category: museum_exhibition
+  homepage: https://www.skirball.org
+  kind: unknown
+  source_priority: 0
+
+- id: la-master-chorale
+  name: LA Master Chorale
+  city: DTLA
+  category: concert
+  homepage: https://www.lamasterchorale.org
+  kind: unknown
+  source_priority: 0
+
+- id: laco
+  name: LA Chamber Orchestra (LACO)
+  city: Glendale
+  category: concert
+  homepage: https://laco.org
+  kind: unknown
+  source_priority: 0
+
+- id: long-beach-symphony
+  name: Long Beach Symphony
+  city: Long Beach
+  category: concert
+  homepage: https://www.longbeachsymphony.org
+  kind: unknown
+  source_priority: 0
+
+- id: pasadena-symphony
+  name: Pasadena Symphony
+  city: Pasadena
+  category: concert
+  homepage: https://www.pasadenasymphony-pops.org
+  kind: unknown
+  source_priority: 0
+
+- id: the-soraya
+  name: The Soraya
+  city: Northridge
+  category: mixed
+  homepage: https://www.thesoraya.org
+  kind: unknown
+  source_priority: 0
+
+- id: royce-hall
+  name: Royce Hall (CAP UCLA)
+  city: Westwood
+  category: mixed
+  homepage: https://cap.ucla.edu
+  kind: unknown
+  source_priority: 0
+
+- id: a-noise-within
+  name: A Noise Within
+  city: Pasadena
+  category: theatre
+  homepage: https://www.anoisewithin.org
+  kind: unknown
+  source_priority: 0

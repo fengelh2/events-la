@@ -1,0 +1,121 @@
+# events-la — featured / "must-see" highlights
+#
+# Same logic as momEvents:
+#   1. featured_keywords: case-insensitive substring match on title (or description)
+#   2. featured_events: manual entries by venue_id + fuzzy title match (with `until:` expiry)
+#
+# Featured events appear pinned at top in "Don't Miss" + ★ badge inline.
+# Cap: 6 cards. Sort: closest closing first.
+
+featured_keywords:
+  # Visual art — Old Masters & 19th-c.
+  - Vermeer
+  - Rembrandt
+  - Caravaggio
+  - Botticelli
+  - Dürer
+  - Tizian
+  - Velazquez
+  - Velázquez
+  - Goya
+  - Turner
+
+  # Visual art — Impressionism / early modernism
+  - Monet
+  - Manet
+  - Renoir
+  - Cezanne
+  - Cézanne
+  - Degas
+  - Van Gogh
+  - Gauguin
+  - Toulouse-Lautrec
+  - Klimt
+  - Munch
+  - Schiele
+
+  # Visual art — Modern / 20th c.
+  - Picasso
+  - Matisse
+  - Kandinsky
+  - Beckmann
+  - Kirchner
+  - Klee
+  - Chagall
+  - Mondrian
+  - Hopper
+  - Bacon
+  - Freud
+  - Warhol
+  - Hockney
+  - Gerhard Richter
+  - Polke
+  - Kara Walker
+  - Cindy Sherman
+  - Jeff Koons
+  - Anselm Kiefer
+  - Yayoi Kusama
+  - Frank Stella
+  - Mark Rothko
+  - Pollock
+
+  # Visual art — non-Western / specific touring shows
+  - Hokusai
+  - Hiroshige
+  - Frida Kahlo
+  - Diego Rivera
+  - Ai Weiwei
+
+  # Composers — anniversary / blockbuster cycles
+  - Beethoven
+  - Mozart
+  - Bach
+  - Brahms
+  - Mahler
+  - Wagner
+  - Verdi
+  - Puccini
+  - Schubert
+  - Schumann
+  - Strauss
+  - Tchaikovsky
+  - Debussy
+  - Ravel
+  - Shostakovich
+  - Stravinsky
+  - Bernstein
+  - Copland
+  - John Adams
+  - John Williams
+
+  # Performers / conductors who travel + sell out
+  - Gustavo Dudamel       # LA Phil's music director — should always pin when on programme
+  - Yo-Yo Ma
+  - Lang Lang
+  - Anne-Sophie Mutter
+  - Yuja Wang
+  - Igor Levit
+  - Daniel Barenboim
+  - Kirill Petrenko
+  - Esa-Pekka Salonen
+  - Anna Netrebko
+  - Renée Fleming
+  - Joshua Bell
+  - Itzhak Perlman
+  - Mitsuko Uchida
+  - Pina Bausch       # in case her company tours
+
+  # Theatre — major touring / signature playwrights
+  - Shakespeare
+  - Hamilton
+  - Sondheim
+  - Tony Kushner
+
+  # Touring blockbusters / signature exhibitions
+  - Tutankhamun
+  - Terracotta
+  - Pompeii
+  - Maya
+  - Inca
+
+featured_events: []
