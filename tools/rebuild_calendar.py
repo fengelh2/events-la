@@ -85,6 +85,23 @@ def main() -> int:
     featured = _compute_featured_set(all_events, highlights)
     log.info("flagged %d events as featured", len(featured))
 
+    # Build venue_id → canonical display name map for the renderer's chip
+    # labels. Without this, off-site events (e.g. Theatre at Ace Hotel, or
+    # any venue where a row's venue_name diverges from the source venue_id)
+    # could spawn phantom chips that silently filter to ALL events of the
+    # parent venue_id. (Same fix as momEvents 6fc0e77.)
+    venue_meta: dict[str, str] = {}
+    for v in venues:
+        primary_id = v.get("id")
+        primary_label = v.get("display_name") or v.get("name") or primary_id
+        if primary_id:
+            venue_meta.setdefault(primary_id, primary_label)
+        for stage in v.get("stage_resolver") or []:
+            sid = stage.get("venue_id")
+            slabel = stage.get("venue_name") or sid
+            if sid:
+                venue_meta.setdefault(sid, slabel)
+
     # Render
     n = render_events_html.render(
         events=all_events,
@@ -93,6 +110,7 @@ def main() -> int:
         title="What's On in LA",
         horizon_days=args.horizon_days,
         now=datetime.now(timezone.utc),
+        venue_meta=venue_meta,
     )
 
     # Summary report
