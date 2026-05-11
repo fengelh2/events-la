@@ -195,6 +195,7 @@ def render(
     now: Optional[datetime] = None,
     horizon_days: int = 90,
     venue_meta: Optional[dict] = None,
+    header_eyebrow: Optional[str] = None,
 ) -> int:
     """Render `events` (list of Event dataclasses or dicts) to one HTML file.
 
@@ -247,6 +248,7 @@ def render(
         featured=featured,
         visible_events=visible,
         venue_meta=venue_meta or {},
+        header_eyebrow=header_eyebrow,
     )
     out_path.write_text(html_text, encoding="utf-8")
     return len(visible)
@@ -542,6 +544,7 @@ def _render_html(
     featured: set,
     visible_events: list,
     venue_meta: Optional[dict] = None,
+    header_eyebrow: Optional[str] = None,
 ) -> str:
     venues_by_city = _collect_venues_by_city(visible_events, venue_meta=venue_meta)
     # Flatten to {chip_id: {venue_ids: set}} — one entry per chip, even if the chip
@@ -685,8 +688,20 @@ def _render_html(
 
     # Header
     parts.append('  <header class="masthead">')
-    parts.append(f'    <h1>{html.escape(title)}</h1>')
-    parts.append(f'    <p class="subtitle">Coming weeks · As of {html.escape(subtitle)}, {now.strftime("%H:%M")}</p>')
+    if header_eyebrow:
+        # Tint "La-La Land" (case-insensitive) so the LA-identity reference
+        # reads like a sunset-warm logo accent. HTML is composed (not
+        # escaped) so the <span> survives; eyebrow comes from trusted config.
+        eb_escaped = html.escape(header_eyebrow)
+        eb_html = re.sub(
+            r"(La[‐-―\-]La\s+Land)",
+            r'<span class="masthead__accent">\1</span>',
+            eb_escaped,
+            flags=re.IGNORECASE,
+        )
+        parts.append(f'    <p class="masthead__eyebrow">{eb_html}</p>')
+    parts.append(f'    <h1 class="masthead__main">{html.escape(title)}</h1>')
+    parts.append(f'    <p class="subtitle">As of {html.escape(subtitle)}, {now.strftime("%H:%M")}</p>')
     parts.append('  </header>')
 
     # All filters wrapped in one panel for visual rhythm
@@ -1125,23 +1140,44 @@ _PAGE_HEAD = """<!DOCTYPE html>
       padding: 32px 20px 80px;
     }}
     /* Header */
+    /* Masthead — eyebrow + main + subtitle stack. All three lines share
+       line-height 1.2 + margin-bottom 4px for one tight visual block. */
     .masthead {{
       padding-bottom: 24px;
       border-bottom: 1px solid var(--rule);
       margin-bottom: 24px;
     }}
-    .masthead h1 {{
+    /* Eyebrow line: tiny caps, letter-spaced, muted. The topic tag
+       ("CULTURE IN LA-LA LAND") above the personal signature. */
+    .masthead__eyebrow {{
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      margin: 0 0 4px;
+      line-height: 1.2;
+    }}
+    /* "La-La Land" accent — warm SoCal sunset orange so the LA reference
+       pops without screaming. */
+    .masthead__accent {{
+      color: #e07b3a;
+      font-weight: 700;
+    }}
+    /* Main title: large, slightly tighter tracking, personal signature feel. */
+    .masthead__main, .masthead h1 {{
       font-size: 36px;
       font-weight: 700;
       letter-spacing: -0.02em;
       margin: 0 0 4px;
-      line-height: 1.15;
+      line-height: 1.2;
     }}
     .masthead .subtitle {{
       color: var(--muted);
       font-size: 14px;
       margin: 0;
       letter-spacing: 0.02em;
+      line-height: 1.2;
     }}
     /* Filter panel — wraps Wo/Was/Wann/Häuser/search in one calm container */
     .filter-panel {{
