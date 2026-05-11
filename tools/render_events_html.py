@@ -556,7 +556,8 @@ def _render_html(
         slug = _city_slug(city)
         name, n = city_counts.get(slug, (city, 0))
         city_counts[slug] = (name, n + 1)
-    cities = sorted(city_counts.items(), key=lambda kv: (-kv[1][1], kv[1][0]))
+    # Alphabetical by display name (matches user expectation A→Z).
+    cities = sorted(city_counts.items(), key=lambda kv: kv[1][0].lower())
     # cities = [(slug, (display_name, count)), ...]
 
     # Per-chip "is checked" visual state (for the chip itself). Filtering of
