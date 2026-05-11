@@ -107,7 +107,7 @@ def main() -> int:
         events=all_events,
         out_path=args.out,
         featured=featured,
-        title="What's happening in Vicky's World",
+        title="What's happening in Vicki's World",
         header_eyebrow="Culture in La-La Land",
         horizon_days=args.horizon_days,
         now=datetime.now(timezone.utc),
