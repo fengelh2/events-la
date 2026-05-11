@@ -1493,23 +1493,79 @@ def _parse_one(text: str, explicit_format: Optional[str] = None) -> Optional[dat
 
 _CATEGORY_KEYWORDS = [
     ("vernissage", ["opening reception", "opening night", "vernissage"]),
+    # Opera rep — extended 2026-05-11 to match momEvents' German + rep-heavy
+    # list. Word-boundary match enforced in _infer_category so e.g. "Aida"
+    # doesn't accidentally trigger inside "Saida" or similar.
     ("opera", [
         "opera", "operetta",
         # Verdi
-        "falstaff", "aida", "rigoletto", "otello", "la traviata", "il trovatore", "nabucco",
+        "falstaff", "aida", "rigoletto", "otello", "la traviata",
+        "il trovatore", "nabucco", "don carlos", "macbeth",
+        "simon boccanegra", "un ballo in maschera", "la forza del destino",
         # Puccini
-        "tosca", "la bohème", "la boheme", "madama butterfly", "turandot", "gianni schicchi",
+        "tosca", "la bohème", "la boheme", "madama butterfly", "turandot",
+        "gianni schicchi", "manon lescaut",
         # Mozart
-        "magic flute", "don giovanni", "cosi fan tutte", "marriage of figaro", "le nozze",
-        # Bizet / Rossini / Donizetti / Strauss / Wagner / Handel
-        "carmen", "barber of seville", "elixir of love", "lucia di lammermoor",
-        "der rosenkavalier", "salome", "elektra", "die walküre", "tannhäuser", "lohengrin",
-        "ring cycle", "tristan und isolde", "parsifal", "fidelio",
+        "magic flute", "zauberflöte",
+        "don giovanni", "cosi fan tutte", "così fan tutte",
+        "marriage of figaro", "le nozze di figaro", "le nozze",
+        "idomeneo", "la clemenza di tito",
+        # Wagner — full Ring cycle + others
+        "die walküre", "rheingold", "siegfried",
+        "götterdämmerung", "ring des nibelungen",
+        "tannhäuser", "lohengrin", "parsifal",
+        "tristan und isolde", "fliegender holländer", "die meistersinger",
+        # R. Strauss
+        "der rosenkavalier", "rosenkavalier", "salome", "elektra",
+        "ariadne auf naxos", "capriccio", "arabella",
+        "die frau ohne schatten",
+        # J. Strauss / Lehár (operettas)
+        "die fledermaus", "fledermaus", "eine nacht in venedig",
+        "der zigeunerbaron", "wiener blut",
+        "lustige witwe", "land des lächelns",
+        # Beethoven / Weber / Humperdinck
+        "fidelio", "der freischütz",
+        "hänsel und gretel", "königskinder",
+        # Bizet / Rossini / Donizetti / Bellini
+        "carmen", "les pêcheurs de perles",
+        "barbiere di siviglia", "barber of seville",
+        "elisir d'amore", "elixir of love", "lucia di lammermoor",
+        "don pasquale", "fille du régiment", "norma",
+        # Tchaikovsky / Mussorgsky / Borodin
+        "eugen onegin", "eugene onegin",
+        "pique dame", "pikowaja dama",
+        "boris godunov", "prince igor",
+        # Massenet / Gounod / Offenbach
+        "werther", "manon", "faust",
+        "contes d'hoffmann", "hoffmanns erzählungen",
+        "orpheus in der unterwelt", "orphée aux enfers",
+        "belle hélène", "schöne helena",
+        # Janáček / Berg / Britten / Bartók
+        "jenufa", "jenůfa", "katja kabanowa",
+        "sache makropulos", "wozzeck", "lulu",
+        "peter grimes", "billy budd", "death in venice",
+        "midsummer night's dream",
+        "herzog blaubarts burg", "bluebeard",
+        # Misc rep
+        "die verkaufte braut", "bartered bride",
+        "rake's progress",
+        "cavalleria rusticana", "pagliacci",
     ]),
     ("ballet", [
-        "ballet", "swan lake", "nutcracker", "sleeping beauty", "giselle", "coppelia",
-        "don quixote", "la sylphide", "la bayadère", "la bayadere", "petrushka",
-        "rite of spring", "raymonda", "sylvia", "spartacus",
+        "ballet", "ballett", "tanztheater",
+        "swan lake", "schwanensee",
+        "nutcracker", "nussknacker",
+        "sleeping beauty", "dornröschen",
+        "giselle", "coppelia", "coppélia",
+        "don quixote", "don quichotte",
+        "la sylphide", "la bayadère", "la bayadere",
+        "petrushka", "petruschka",
+        "rite of spring", "le sacre du printemps", "frühlingsopfer",
+        "raymonda", "sylvia", "spartacus", "spartakus",
+        "feuervogel", "firebird",
+        "daphnis und chloé", "daphnis et chloé",
+        "boléro", "bolero",
+        "tanzhommage",
     ]),
     ("concert", [
         "symphony", "concerto", "philharmonic", "chamber music",
@@ -1525,12 +1581,14 @@ _CATEGORY_KEYWORDS = [
 # Famous musicals — titles literally contain "opera"/"ballet" but they're
 # musical theatre, not opera/ballet. Tag them as theatre.
 _MUSICAL_THEATRE_TITLES = (
-    "phantom of the opera",
+    "phantom of the opera", "phantom der oper",
     "les misérables", "les miserables",
     "miss saigon",
     "evita",
     "jesus christ superstar",
-    "the lion king",
+    "tanz der vampire",
+    "rebecca",
+    "the lion king", "der könig der löwen",
     "wicked",
     "hamilton",
     "hadestown",
@@ -1540,6 +1598,13 @@ _MUSICAL_THEATRE_TITLES = (
     "company",  # Sondheim
     "into the woods",
     "sweeney todd",
+    "starlight express",
+    "anatevka", "fiddler on the roof",
+    "mamma mia",
+    "beauty and the beast", "die schöne und das biest",
+    "tarzan",
+    "rocky horror",
+    "we will rock you",
 )
 
 
