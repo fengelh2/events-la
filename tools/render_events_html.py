@@ -297,17 +297,25 @@ def _collect_venues_by_city(
         group["cats"].update(bucket["cats"])
         group["n"] += bucket["n"]
 
-    # Suppress chips with <2 events — phantom venues from aggregator feeds
-    # (random street locations, one-off school auditoriums, etc.) shouldn't
-    # clutter the venues filter row. The events still render in the agenda.
+    # Suppress chips with <2 events UNLESS the chip controls a venue_id
+    # explicitly configured in venues.yaml (appears in venue_meta). This
+    # keeps real single-event venues — static/permanent exhibitions, venues
+    # in transition — visible while still filtering phantom one-off venues
+    # spawned by aggregators.
     MIN_EVENTS_PER_CHIP = 2
+    configured_vids = set(venue_meta.keys()) if venue_meta else set()
+
+    def _keep(group: dict) -> bool:
+        if group["n"] >= MIN_EVENTS_PER_CHIP:
+            return True
+        return any(vid in configured_vids for vid in group["venue_ids"])
 
     out: dict[str, list[tuple[str, str, set, set]]] = {}
     for cslug, groups in seen.items():
         kept = [
             (cid, g["name"], g["venue_ids"], g["cats"])
             for cid, g in groups.items()
-            if g["n"] >= MIN_EVENTS_PER_CHIP
+            if _keep(g)
         ]
         out[cslug] = sorted(kept, key=lambda t: t[1].lower())
     return out
