@@ -114,6 +114,13 @@ def main() -> int:
         venue_meta=venue_meta,
     )
 
+    # Audit log — write chip-quality findings (phantoms, near-duplicates) to
+    # .tmp/chip_audit.md. Mirrors momEvents 2026-05-11.
+    try:
+        _emit_chip_audit(all_events, venue_meta, Path(args.out).parent / "chip_audit.md")
+    except Exception as exc:
+        log.warning("chip audit failed: %s", exc)
+
     # Summary report
     print()
     print(f"Run {datetime.now(timezone.utc).isoformat(timespec='seconds')} — "
@@ -145,6 +152,101 @@ def _load_highlights(path: str) -> dict:
         "featured_keywords": data.get("featured_keywords") or [],
         "featured_events": data.get("featured_events") or [],
     }
+
+
+def _emit_chip_audit(events: list, venue_meta: dict, out_path: Path) -> None:
+    """Write a markdown report of chip-quality findings (mirror of momEvents):
+
+      1. Per-city chip roster (event count + canonical label).
+      2. Single-event chips that aren't in venues.yaml (phantom candidates).
+      3. Fuzzy-similar chip-label pairs within the same city (≥ 80 score).
+    """
+    from collections import Counter as _Counter
+    try:
+        from rapidfuzz import fuzz as _fuzz
+    except ImportError:
+        _fuzz = None
+
+    chips: dict[tuple[str, str], dict] = {}
+    for e in events:
+        vid = getattr(e, "venue_id", None) or (e.get("venue_id") if isinstance(e, dict) else None) or ""
+        city = getattr(e, "city", None) or (e.get("city") if isinstance(e, dict) else None) or ""
+        vname = getattr(e, "venue_name", None) or (e.get("venue_name") if isinstance(e, dict) else None) or ""
+        if not vid or not city or city == "__aggregator__":
+            continue
+        bucket = chips.setdefault((city, vid), {"n": 0, "names": _Counter()})
+        bucket["n"] += 1
+        bucket["names"][vname] += 1
+
+    chip_rows: list[dict] = []
+    for (city, vid), bucket in chips.items():
+        canonical = venue_meta.get(vid) or (bucket["names"].most_common(1)[0][0] if bucket["names"] else vid)
+        chip_rows.append({"city": city, "vid": vid, "label": canonical, "n": bucket["n"], "in_config": vid in venue_meta})
+
+    parts: list[str] = []
+    parts.append(f"# Chip audit — {datetime.now(timezone.utc).isoformat(timespec='seconds')}")
+    parts.append("")
+    parts.append("Auto-generated. Review periodically; add overrides to `venues.yaml`.")
+    parts.append("")
+    parts.append("## Chips by city")
+    parts.append("")
+    by_city: dict[str, list] = {}
+    for row in chip_rows:
+        by_city.setdefault(row["city"], []).append(row)
+    for city in sorted(by_city):
+        rows = sorted(by_city[city], key=lambda r: (-r["n"], r["label"].lower()))
+        parts.append(f"### {city}  _(chips: {len(rows)})_")
+        parts.append("")
+        parts.append("| events | venue_id | label | configured |")
+        parts.append("|---:|---|---|:---:|")
+        for r in rows:
+            tick = "✓" if r["in_config"] else " "
+            parts.append(f"| {r['n']} | `{r['vid']}` | {r['label']} | {tick} |")
+        parts.append("")
+
+    phantoms = [r for r in chip_rows if r["n"] == 1 and not r["in_config"]]
+    parts.append("## Single-event chips not in `venues.yaml` (phantom candidates)")
+    parts.append("")
+    if phantoms:
+        parts.append("| city | venue_id | label |")
+        parts.append("|---|---|---|")
+        for r in sorted(phantoms, key=lambda r: (r["city"], r["label"].lower())):
+            parts.append(f"| {r['city']} | `{r['vid']}` | {r['label']} |")
+        parts.append("")
+    else:
+        parts.append("_(none)_")
+        parts.append("")
+
+    parts.append("## Possible duplicate label pairs (within city)")
+    parts.append("")
+    parts.append("Pairs scoring rapidfuzz token_set_ratio >= 80.")
+    parts.append("")
+    found_any = False
+    if _fuzz is not None:
+        for city, rows in sorted(by_city.items()):
+            labels = [(r["label"], r["vid"]) for r in rows]
+            pairs: list[tuple[int, str, str, str, str]] = []
+            for i in range(len(labels)):
+                for j in range(i + 1, len(labels)):
+                    score = int(_fuzz.token_set_ratio(labels[i][0], labels[j][0]))
+                    if score >= 80 and labels[i][0].lower() != labels[j][0].lower():
+                        pairs.append((score, labels[i][0], labels[i][1], labels[j][0], labels[j][1]))
+            if pairs:
+                found_any = True
+                parts.append(f"### {city}")
+                parts.append("")
+                parts.append("| score | label A (venue_id) | label B (venue_id) |")
+                parts.append("|---:|---|---|")
+                for score, la, va, lb, vb in sorted(pairs, key=lambda p: -p[0]):
+                    parts.append(f"| {score} | {la} (`{va}`) | {lb} (`{vb}`) |")
+                parts.append("")
+    if not found_any:
+        parts.append("_(none found)_")
+        parts.append("")
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text("\n".join(parts), encoding="utf-8")
+    log.info("chip audit written: %s", out_path)
 
 
 def _compute_featured_set(events: list, highlights: dict) -> set:
