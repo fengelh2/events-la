@@ -220,6 +220,28 @@
 # Not onboarded yet because they need parser features beyond the current
 # kinds. Listed here for future onboarding.
 
+- id: academy-museum
+  name: Academy Museum of Motion Pictures
+  city: Central LA
+  category: film
+  homepage: https://www.academymuseum.org
+  calendar_url: https://www.academymuseum.org/en/calendar
+  kind: nextjs_contentful
+  source_priority: 0
+  data_path: /en/calendar.json
+  typename: ProgramEvent
+  title_field: programTitle
+  start_field: activeStartDate
+  end_field: activeEndDate
+  url_pattern: https://www.academymuseum.org/en/program/{slug}
+  notes: |
+    Mid-Wilshire museum of cinema (Saban Building, ex-May Co.). Built on
+    Next.js + Contentful. The /en/calendar page embeds a rotating buildId;
+    we fetch /_next/data/<buildId>/en/calendar.json (~460KB) and walk for
+    __typename=ProgramEvent (63 items). Title is Contentful rich-text
+    nested under programTitle.json.content[..] → flattened by the parser.
+    Onboarded 2026-05-11 via the nextjs_contentful parser kind.
+
 - id: la-philharmonic
   name: LA Philharmonic — Walt Disney Concert Hall
   city: Central LA

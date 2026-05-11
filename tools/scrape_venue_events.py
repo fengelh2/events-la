@@ -91,6 +91,8 @@ def scrape(venue_row: dict, session: Optional[requests.Session] = None) -> list[
             events = _scrape_algolia_calendar(venue_row, session=session)
         elif kind == "flat_json_feed":
             events = _scrape_flat_json_feed(venue_row, session=session)
+        elif kind == "nextjs_contentful":
+            events = _scrape_nextjs_contentful(venue_row, session=session)
         elif kind == "unknown":
             log.info("skip %s: kind=unknown (pending onboarding)", venue_id)
             return []
@@ -787,6 +789,138 @@ def _dig(obj, path: str):
         if cur is None:
             return None
     return cur
+
+
+# ─── Next.js + Contentful path ──────────────────────────────────────────────
+# Sites built on Next.js + Contentful (Academy Museum of Motion Pictures is
+# the canonical case) expose `_next/data/<buildId>/<route>.json` endpoints
+# that mirror the page's getStaticProps payload. We:
+#   1. Fetch the page HTML to discover the rotating buildId.
+#   2. Hit the data endpoint, walk the JSON tree for the configured Contentful
+#      __typename, and extract events from each match.
+#   3. Flatten Contentful rich-text fields (programTitle is wrapped in nested
+#      {json: {content: [...]}} arrays) to plain strings.
+
+
+def _rich_text_to_plain(node) -> str:
+    """Flatten a Contentful rich-text node tree to a plain string."""
+    if not node:
+        return ""
+    if isinstance(node, str):
+        return node
+    if isinstance(node, dict):
+        if node.get("nodeType") == "text":
+            return node.get("value", "")
+        if "json" in node:
+            return _rich_text_to_plain(node["json"])
+        if "content" in node:
+            return "".join(_rich_text_to_plain(c) for c in node["content"])
+    if isinstance(node, list):
+        return "".join(_rich_text_to_plain(x) for x in node)
+    return ""
+
+
+def _scrape_nextjs_contentful(venue_row: dict, session=None) -> list[Event]:
+    """Scrape a Next.js + Contentful events page via the _next/data/<buildId>/...
+    JSON endpoint.
+
+    Config:
+      calendar_url: the HTML page that embeds the buildId (e.g. /en/calendar)
+      data_path:    path suffix appended to /_next/data/<buildId>/ (e.g. /en/calendar.json)
+      typename:     Contentful __typename to extract (default 'ProgramEvent')
+      title_field:  Contentful rich-text field for the title (default 'programTitle')
+      start_field:  ISO datetime field (default 'activeStartDate')
+      end_field:    ISO datetime field (default 'activeEndDate'; falsy → no end)
+      slug_field:   slug field for URL construction (default 'slug')
+      url_pattern:  detail URL template, {slug} substituted (default homepage)
+    """
+    sess = session or requests
+    page_url = venue_row["calendar_url"]
+    try:
+        r = sess.get(page_url, headers=DEFAULT_HEADERS, timeout=DEFAULT_TIMEOUT)
+        r.raise_for_status()
+    except requests.RequestException as exc:
+        log.warning("%s: nextjs page fetch failed: %s", venue_row["id"], exc)
+        return []
+    m = re.search(r'"buildId"\s*:\s*"([^"]+)"', r.text)
+    if not m:
+        log.warning("%s: nextjs buildId not found", venue_row["id"])
+        return []
+    build_id = m.group(1)
+
+    data_path = venue_row.get("data_path") or "/en/calendar.json"
+    host = "https://" + page_url.split("/")[2]
+    data_url = f"{host}/_next/data/{build_id}{data_path}"
+    try:
+        r2 = sess.get(data_url, headers=DEFAULT_HEADERS, timeout=DEFAULT_TIMEOUT + 10)
+        r2.raise_for_status()
+        data = r2.json()
+    except (requests.RequestException, ValueError) as exc:
+        log.warning("%s: nextjs data fetch failed (%s): %s", venue_row["id"], data_url, exc)
+        return []
+
+    typename = venue_row.get("typename", "ProgramEvent")
+    matches: list[dict] = []
+
+    def _walk(obj, depth=0):
+        if depth > 14 or obj is None:
+            return
+        if isinstance(obj, dict):
+            if obj.get("__typename") == typename:
+                matches.append(obj)
+            for v in obj.values():
+                _walk(v, depth + 1)
+        elif isinstance(obj, list):
+            for x in obj:
+                _walk(x, depth + 1)
+
+    _walk(data)
+
+    title_field = venue_row.get("title_field", "programTitle")
+    start_field = venue_row.get("start_field", "activeStartDate")
+    end_field = venue_row.get("end_field", "activeEndDate")
+    slug_field = venue_row.get("slug_field", "slug")
+    url_pattern = venue_row.get("url_pattern") or venue_row.get("homepage", "#")
+
+    out: list[Event] = []
+    seen: set[tuple] = set()
+    for m_item in matches:
+        title = _clean_title(_rich_text_to_plain(m_item.get(title_field)))
+        if not title:
+            continue
+        start = _parse_jsonld_dt(m_item.get(start_field))
+        end = _parse_jsonld_dt(m_item.get(end_field)) if end_field else None
+        if start is None:
+            continue
+        slug = m_item.get(slug_field) or ""
+        if "{slug}" in url_pattern and slug:
+            url = url_pattern.replace("{slug}", slug)
+        else:
+            url = venue_row.get("homepage", "#")
+        category = venue_row.get("category", "other")
+        if category == "mixed":
+            category = "other"
+        venue_name = venue_row.get("display_name") or venue_row["name"]
+        key = (title, start)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(Event(
+            title=title,
+            start=start,
+            end=end,
+            venue_id=venue_row["id"],
+            venue_name=venue_name,
+            city=venue_row.get("city", ""),
+            category=category,
+            url=url,
+            description=None,
+            source=venue_row["id"],
+            audience=_infer_audience(title),
+        ))
+
+    log.info("%s: %d events from nextjs_contentful", venue_row["id"], len(out))
+    return out
 
 
 def _scrape_flat_json_feed(venue_row: dict, session=None) -> list[Event]:
