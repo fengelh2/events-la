@@ -28,6 +28,12 @@ from urllib.parse import urljoin
 import dateparser
 import requests
 import yaml
+from zoneinfo import ZoneInfo
+
+# All naive parsed times are LA wall-clock — never UTC. Tagging them UTC
+# (the previous default) shifted every evening event to the next calendar
+# day in display.
+_LA_TZ = ZoneInfo("America/Los_Angeles")
 from bs4 import BeautifulSoup
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -168,7 +174,8 @@ def _scrape_detail_pages(venue_row: dict, session=None) -> list[Event]:
                 break
         if not title:
             continue
-        start = _parse_one(date_text, venue_row.get("date_format"))
+        start = _parse_one(date_text, venue_row.get("date_format"),
+                           date_prefer=venue_row.get("date_prefer", "future"))
         if start is None:
             log.debug("  %s: failed to parse date %r", url, date_text)
             continue
@@ -569,18 +576,17 @@ def _scrape_json_ld_aggregator(venue_row: dict, session=None) -> list[Event]:
 
 
 def _parse_jsonld_dt(s) -> Optional[datetime]:
-    """Parse a JSON-LD ISO-8601 datetime; return tz-aware or None."""
+    """Parse a JSON-LD ISO-8601 datetime; return tz-aware LA datetime or None."""
     if not s or not isinstance(s, str):
         return None
     try:
         dt = datetime.fromisoformat(s)
     except ValueError:
         return None
+    # JSON-LD is supposed to carry TZ; assume LA wall-clock if naive.
     if dt.tzinfo is None:
-        # JSON-LD is supposed to carry TZ; fall back to America/Los_Angeles
-        # (the page is LA-local) by treating as UTC and shifting.
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt
+        dt = dt.replace(tzinfo=_LA_TZ)
+    return dt.astimezone(_LA_TZ)
 
 
 # ─── tribe events REST API path ─────────────────────────────────────────────
@@ -661,8 +667,16 @@ def _tribe_to_event(raw: dict, venue_row: dict, venue_filter: str | None = None)
         if venue_filter.lower() not in vname.lower():
             return None
 
-    start = _parse_tribe_dt(raw.get("utc_start_date") or raw.get("start_date"))
-    end = _parse_tribe_dt(raw.get("utc_end_date") or raw.get("end_date"))
+    # utc_* fields are naive-UTC, plain fields are naive-LA. Flag so the
+    # parser can localize each correctly before converting to LA.
+    if raw.get("utc_start_date"):
+        start = _parse_tribe_dt(raw["utc_start_date"], naive_is_utc=True)
+    else:
+        start = _parse_tribe_dt(raw.get("start_date"))
+    if raw.get("utc_end_date"):
+        end = _parse_tribe_dt(raw["utc_end_date"], naive_is_utc=True)
+    else:
+        end = _parse_tribe_dt(raw.get("end_date"))
     if start is None:
         return None
 
@@ -829,8 +843,11 @@ def _algolia_hit_to_event(h: dict, venue_row: dict, url_prefix: str = "") -> Opt
             start_ms = dates[0]
         else:
             return None
-    start = datetime.fromtimestamp(start_ms / 1000, tz=timezone.utc)
-    end = datetime.fromtimestamp(end_ms / 1000, tz=timezone.utc) if isinstance(end_ms, (int, float)) and end_ms > 0 else None
+    start = datetime.fromtimestamp(start_ms / 1000, tz=timezone.utc).astimezone(_LA_TZ)
+    end = (
+        datetime.fromtimestamp(end_ms / 1000, tz=timezone.utc).astimezone(_LA_TZ)
+        if isinstance(end_ms, (int, float)) and end_ms > 0 else None
+    )
 
     venue_name = _clean_title(_html_decode(h.get("Venue") or "")) or (
         venue_row.get("display_name") or venue_row["name"]
@@ -1128,18 +1145,23 @@ def _scrape_flat_json_feed(venue_row: dict, session=None) -> list[Event]:
     return out
 
 
-def _parse_tribe_dt(s) -> Optional[datetime]:
-    """Parse Tribe REST datetime ('YYYY-MM-DD HH:MM:SS', UTC if from utc_*)."""
+def _parse_tribe_dt(s, naive_is_utc: bool = False) -> Optional[datetime]:
+    """Parse Tribe REST datetime ('YYYY-MM-DD HH:MM:SS').
+
+    Tribe's `utc_start_date` is a naive UTC string; `start_date` is a naive
+    LA wall-clock string. The caller passes `naive_is_utc=True` for utc_*
+    fields so we localize before converting to America/Los_Angeles.
+    Result is always tz-aware LA time.
+    """
     if not s or not isinstance(s, str):
         return None
     try:
-        # Tribe utc_* fields are UTC; non-utc are local. We treat utc_* as UTC.
         dt = datetime.fromisoformat(s.replace(" ", "T"))
     except ValueError:
         return None
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt
+        dt = dt.replace(tzinfo=timezone.utc if naive_is_utc else _LA_TZ)
+    return dt.astimezone(_LA_TZ)
 
 
 # Marketing-ribbon suffixes Tribe sites bake into the title via
@@ -1168,18 +1190,18 @@ def _html_decode(s: str) -> str:
 
 
 def _coerce_to_dt(v) -> Optional[datetime]:
-    """Coerce a YAML date/datetime/ISO-string into a tz-aware datetime."""
+    """Coerce a YAML date/datetime/ISO-string into a tz-aware LA datetime."""
     if v is None:
         return None
     if isinstance(v, datetime):
-        return v if v.tzinfo else v.replace(tzinfo=timezone.utc)
+        return (v if v.tzinfo else v.replace(tzinfo=_LA_TZ)).astimezone(_LA_TZ)
     from datetime import date as _date
     if isinstance(v, _date):
-        return datetime(v.year, v.month, v.day, tzinfo=timezone.utc)
+        return datetime(v.year, v.month, v.day, tzinfo=_LA_TZ)
     if isinstance(v, str):
         try:
             dt = datetime.fromisoformat(v)
-            return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+            return (dt if dt.tzinfo else dt.replace(tzinfo=_LA_TZ)).astimezone(_LA_TZ)
         except ValueError:
             return None
     return None
@@ -1499,16 +1521,19 @@ def _assemble_from_html_item(
             time_t = _select_text(item, sel.get("date_time")) if sel.get("date_time") else ""
             yr = ctx_year or datetime.now(timezone.utc).year
             date_text = f"{day_t}. {month_ctx} {yr} {time_t}".strip()
-            start = _parse_one(date_text, venue_row.get("date_format"))
+            start = _parse_one(date_text, venue_row.get("date_format"),
+                               date_prefer=venue_row.get("date_prefer", "future"))
     if start is not None:
         pass  # month_context mode already produced a start
     elif sel.get("date_start") or sel.get("date_end"):
         start_t = _select_text(item, sel.get("date_start"))
         end_t = _select_text(item, sel.get("date_end"))
         if start_t:
-            start = _parse_one(start_t, venue_row.get("date_format"))
+            start = _parse_one(start_t, venue_row.get("date_format"),
+                               date_prefer=venue_row.get("date_prefer", "future"))
         if end_t:
-            end = _parse_one(end_t, venue_row.get("date_format"))
+            end = _parse_one(end_t, venue_row.get("date_format"),
+                             date_prefer=venue_row.get("date_prefer", "future"))
         date_text = f"{start_t} – {end_t}".strip(" –")
     elif venue_row.get("date_from_title"):
         mode = venue_row.get("date_from_title_mode", "single")
@@ -1531,8 +1556,10 @@ def _assemble_from_html_item(
                     yr = re.search(r"(\d{4})", end_str)
                     if yr:
                         start_str = start_str + yr.group(1)
-                start = _parse_one(start_str, venue_row.get("date_format"))
-                end = _parse_one(end_str, venue_row.get("date_format"))
+                start = _parse_one(start_str, venue_row.get("date_format"),
+                                   date_prefer=venue_row.get("date_prefer", "future"))
+                end = _parse_one(end_str, venue_row.get("date_format"),
+                                 date_prefer=venue_row.get("date_prefer", "future"))
         else:
             date_pattern = venue_row.get(
                 "date_from_title_pattern",
@@ -1545,11 +1572,13 @@ def _assemble_from_html_item(
                 title = re.sub(re.escape(date_text), "", haystack).strip(" -–—,.\n\t")
             if date_text:
                 if re.match(r"^(?:Bis|bis|Noch bis|noch bis)\b", date_text):
-                    end = _parse_one(date_text, venue_row.get("date_format"))
+                    end = _parse_one(date_text, venue_row.get("date_format"),
+                                     date_prefer=venue_row.get("date_prefer", "future"))
                     today = datetime.now(timezone.utc)
                     start = today.replace(hour=0, minute=0, second=0, microsecond=0)
                 else:
-                    start = _parse_one(date_text, venue_row.get("date_format"))
+                    start = _parse_one(date_text, venue_row.get("date_format"),
+                                       date_prefer=venue_row.get("date_prefer", "future"))
     else:
         date_text = _select_text(item, sel.get("date"))
         # Optional pre-extract: pull a clean date substring out of a noisy
@@ -1569,7 +1598,8 @@ def _assemble_from_html_item(
                 m = re.search(extract_re, date_text)
                 if m:
                     date_text = m.group(0)
-        start, end = _parse_date_range(date_text, venue_row.get("date_format"))
+        start, end = _parse_date_range(date_text, venue_row.get("date_format"),
+                                        date_prefer=venue_row.get("date_prefer", "future"))
 
     if start is None:
         log.debug("%s: failed to parse date %r (raw_title=%r)", venue_row["id"], date_text, raw_title)
@@ -1660,19 +1690,34 @@ def _select_attr(node, selector: Optional[str], attr: str) -> str:
 # ─── date parsing ────────────────────────────────────────────────────────────
 
 
-_DATE_PARSER_KW = dict(
-    languages=["en"],
-    settings={
-        "PREFER_DATES_FROM": "future",
-        # US convention is MM/DD/YYYY. Opposite of the German project's DMY.
-        # Note: dateparser tries to detect format from input first; explicit
-        # MDY just disambiguates "5/12/2026" → May 12, not Dec 5.
-        "DATE_ORDER": "MDY",
-    },
-)
+_DATE_PARSER_BASE_SETTINGS = {
+    # US convention is MM/DD/YYYY. Opposite of the German project's DMY.
+    # Note: dateparser tries to detect format from input first; explicit
+    # MDY just disambiguates "5/12/2026" → May 12, not Dec 5.
+    "DATE_ORDER": "MDY",
+}
 
 
-def _parse_date_range(text: str, explicit_format: Optional[str] = None) -> tuple[Optional[datetime], Optional[datetime]]:
+def _date_parser_kw(date_prefer: str = "future") -> dict:
+    """Build dateparser kwargs with the configured PREFER_DATES_FROM mode.
+
+    Default 'future'. Venues that publish dates without years AND whose
+    earliest listing might equal today (e.g. New Beverly's nightly schedule
+    where "Thu, May 14" on a Thursday rolls forward a year under 'future')
+    should set `date_prefer: current_period` in venues.yaml.
+    """
+    return {
+        "languages": ["en"],
+        "settings": {**_DATE_PARSER_BASE_SETTINGS, "PREFER_DATES_FROM": date_prefer},
+    }
+
+
+# Back-compat name — old callers expect this.
+_DATE_PARSER_KW = _date_parser_kw("future")
+
+
+def _parse_date_range(text: str, explicit_format: Optional[str] = None,
+                       date_prefer: str = "future") -> tuple[Optional[datetime], Optional[datetime]]:
     """Parse a German date string, possibly a range, into (start, end).
 
     Handles patterns like:
@@ -1693,8 +1738,8 @@ def _parse_date_range(text: str, explicit_format: Optional[str] = None) -> tuple
     for sep in [" – ", " — ", " - ", "–", "—", " bis ", " – bis "]:
         if sep in text:
             left, right = text.split(sep, 1)
-            l = _parse_one(left.strip(), explicit_format)
-            r = _parse_one(right.strip(), explicit_format)
+            l = _parse_one(left.strip(), explicit_format, date_prefer=date_prefer)
+            r = _parse_one(right.strip(), explicit_format, date_prefer=date_prefer)
             if l and r:
                 return (l, r)
 
@@ -1702,16 +1747,17 @@ def _parse_date_range(text: str, explicit_format: Optional[str] = None) -> tuple
     m = re.match(r"^(\d{1,2}\.\d{1,2}\.)[–—-](\d{1,2}\.\d{1,2}\.\d{4})$", text)
     if m:
         l_str = m.group(1) + m.group(2).split(".")[-1]   # tack year on
-        l = _parse_one(l_str, explicit_format)
-        r = _parse_one(m.group(2), explicit_format)
+        l = _parse_one(l_str, explicit_format, date_prefer=date_prefer)
+        r = _parse_one(m.group(2), explicit_format, date_prefer=date_prefer)
         if l and r:
             return (l, r)
 
-    single = _parse_one(text, explicit_format)
+    single = _parse_one(text, explicit_format, date_prefer=date_prefer)
     return (single, None)
 
 
-def _parse_one(text: str, explicit_format: Optional[str] = None) -> Optional[datetime]:
+def _parse_one(text: str, explicit_format: Optional[str] = None,
+                date_prefer: str = "future") -> Optional[datetime]:
     text = text.strip().rstrip(".")
     if not text:
         return None
@@ -1719,17 +1765,22 @@ def _parse_one(text: str, explicit_format: Optional[str] = None) -> Optional[dat
     if explicit_format:
         try:
             dt = datetime.strptime(text, explicit_format)
-            return dt.replace(tzinfo=timezone.utc)
+            return dt.replace(tzinfo=_LA_TZ)
         except ValueError:
             pass
 
-    # ISO 8601 first. dateparser with DATE_ORDER='DMY' (set globally for German
+    # ISO 8601 first. dateparser with DATE_ORDER='MDY' (set globally for US
     # numeric dates) actively rejects ISO format, so any "2026-05-23" coming
     # from a <time datetime="..."> attribute would silently fail otherwise.
+    # Tribe REST emits UTC-tagged ISO strings ("2026-05-14T03:00:00Z" = 8 PM
+    # PDT the prior day) — convert those to LA so display lands on the
+    # correct calendar day.
     try:
         dt = datetime.fromisoformat(text)
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
+            dt = dt.replace(tzinfo=_LA_TZ)
+        else:
+            dt = dt.astimezone(_LA_TZ)
         return dt
     except ValueError:
         pass
@@ -1739,11 +1790,13 @@ def _parse_one(text: str, explicit_format: Optional[str] = None) -> Optional[dat
         if text.lower().startswith(prefix):
             text = text[len(prefix):]
 
-    parsed = dateparser.parse(text, **_DATE_PARSER_KW)
+    parsed = dateparser.parse(text, **_date_parser_kw(date_prefer))
     if parsed is None:
         return None
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
+        parsed = parsed.replace(tzinfo=_LA_TZ)
+    else:
+        parsed = parsed.astimezone(_LA_TZ)
     return parsed
 
 

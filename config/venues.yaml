@@ -94,6 +94,7 @@
     title: "h4"
     date: ".date"
     detail_link: "a@href"
+  accept_drop_rate: 0.45      # ~7 of 21 are recurring undated tours (Garden/Architecture/Collection)
   notes: |
     Brentwood (Westside) — Getty Center. Single calendar covers both Getty
     Center + Getty Villa (also Westside). ~21 tiles per page. Date format
@@ -197,6 +198,7 @@
     title: ".event-card__title"
     date: ".event-card__date"
     detail_link: "a@href"
+  date_prefer: current_period   # "Thu, May 14" on a Thursday rolls to 2027 under 'future'
   notes: |
     Tarantino's rep cinema. ~35 events on the rolling schedule. Date format
     "Sun May 10" — no year, dateparser PREFER_DATES_FROM=future infers it.
