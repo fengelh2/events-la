@@ -1411,7 +1411,9 @@ def _scrape_html_list(venue_row: dict, session=None) -> list[Event]:
 
     # WARNING when >30% of selected items got dropped (usually silent
     # date-parse failure or selector mismatch). Mirrors momEvents c297828.
-    DROP_WARN_THRESHOLD = 0.30
+    # Per-venue `accept_drop_rate: 0.5` raises the threshold for venues
+    # with legitimate intentional drops (closure notices, placeholders).
+    DROP_WARN_THRESHOLD = float(venue_row.get("accept_drop_rate", 0.30))
     MIN_ITEMS_FOR_WARN = 3
     if total_items >= MIN_ITEMS_FOR_WARN and total_items > len(out):
         dropped = total_items - len(out)
