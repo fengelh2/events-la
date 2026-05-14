@@ -30,6 +30,21 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      # Cache + install Playwright Chromium for runtime-rendered venues.
+      - name: Compute Playwright version
+        id: pw-version
+        run: |
+          echo "version=$(pip show playwright | awk '/^Version:/ {print $2}')" >> $GITHUB_OUTPUT
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ steps.pw-version.outputs.version }}
+
+      - name: Install Playwright Chromium
+        run: python -m playwright install --with-deps chromium
+
       - name: Rebuild events.html
         run: python tools/rebuild_calendar.py --verbose
 

@@ -4,3 +4,4 @@ icalendar
 dateparser
 PyYAML
 rapidfuzz
+playwright
