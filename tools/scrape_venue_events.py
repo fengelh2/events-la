@@ -83,6 +83,8 @@ def scrape(venue_row: dict, session: Optional[requests.Session] = None) -> list[
             events = _scrape_detail_pages(venue_row, session=session)
         elif kind == "static":
             events = _scrape_static(venue_row)
+        elif kind == "playwright_html_list":
+            events = _scrape_playwright_html_list(venue_row, session=session)
         elif kind == "json_ld_aggregator":
             events = _scrape_json_ld_aggregator(venue_row, session=session)
         elif kind == "tribe_rest":
@@ -185,6 +187,111 @@ def _scrape_detail_pages(venue_row: dict, session=None) -> list[Event]:
                 audience=_infer_audience(title),
             )
         )
+    return out
+
+
+# ─── Runtime-Playwright HTML list path ──────────────────────────────────────
+# For JS-rendered LA venues without a discoverable JSON API (CTG queue-it,
+# The Broad, MOCA, Soraya, CAP UCLA, etc.) — render the page in headless
+# Chromium, then run html_list-style selectors against the rendered DOM.
+# CI workflow installs `playwright install --with-deps chromium`.
+
+
+def _scrape_playwright_html_list(venue_row: dict, session=None) -> list[Event]:
+    """Render `calendar_url` in headless Chromium, then extract events using
+    html_list-style selectors against the rendered DOM.
+
+    Config (extends html_list):
+      calendar_url, selectors.item/title/date/...: same as html_list
+      wait_for_selector: optional CSS selector to wait for before extraction
+      scroll:            bool, default true — scroll to bottom for lazy-load
+      dismiss_cookies:   bool, default true — try common cookie-accept buttons
+      timeout_ms:        page-load timeout (default 45000)
+      extra_wait_ms:     fixed wait after load/scroll (default 3000)
+      locale:            browser locale (default 'en-US')
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        log.warning("%s: playwright not installed; skipping", venue_row["id"])
+        return []
+
+    url = venue_row["calendar_url"]
+    wait_for = venue_row.get("wait_for_selector")
+    do_scroll = bool(venue_row.get("scroll", True))
+    do_cookies = bool(venue_row.get("dismiss_cookies", True))
+    timeout_ms = int(venue_row.get("timeout_ms", 45000))
+    extra_wait_ms = int(venue_row.get("extra_wait_ms", 3000))
+
+    html_text: Optional[str] = None
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            context = browser.new_context(
+                user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+                locale=venue_row.get("locale", "en-US"),
+            )
+            page = context.new_page()
+            page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+            if do_cookies:
+                for selector in [
+                    "button:has-text('Accept all')",
+                    "button:has-text('Allow all')",
+                    "button:has-text('I agree')",
+                    "button:has-text('Akzeptieren')",
+                    "[data-testid='uc-accept-all-button']",
+                    "#uc-btn-accept-banner",
+                    "button.uc-btn-accept",
+                    "#CybotCookiebotDialogBodyButtonAccept",
+                ]:
+                    try:
+                        page.click(selector, timeout=1500)
+                        break
+                    except Exception:
+                        pass
+            if wait_for:
+                try:
+                    page.wait_for_selector(wait_for, timeout=timeout_ms)
+                except Exception as exc:
+                    log.warning("%s: wait_for_selector failed: %s", venue_row["id"], exc)
+            if do_scroll:
+                try:
+                    for _ in range(8):
+                        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                        page.wait_for_timeout(700)
+                except Exception:
+                    pass
+            page.wait_for_timeout(extra_wait_ms)
+            html_text = page.content()
+            browser.close()
+    except Exception as exc:
+        log.warning("%s: playwright render failed: %s", venue_row["id"], exc)
+        return []
+
+    if not html_text:
+        return []
+
+    soup = BeautifulSoup(html_text, "html.parser")
+    sel = venue_row.get("selectors") or {}
+    item_sel = sel.get("item")
+    if not item_sel:
+        log.warning("%s: playwright_html_list missing selectors.item", venue_row["id"])
+        return []
+    items = soup.select(item_sel)
+    log.debug("%s: rendered DOM has %d items", venue_row["id"], len(items))
+
+    out: list[Event] = []
+    prev_day = None
+    for it in items:
+        ev, prev_day = _assemble_from_html_item(
+            it, url, venue_row,
+            month_ctx=None,
+            ctx_year=None,
+            prev_day=prev_day,
+        )
+        if ev is not None:
+            out.append(ev)
+    log.info("%s: %d events from playwright_html_list", venue_row["id"], len(out))
     return out
 
 
