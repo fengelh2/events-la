@@ -61,6 +61,7 @@ class Event:
     price: Optional[str] = None
     source: str = ""
     audience: str = "general"   # general | kids | educational  (drives display dimming)
+    first_seen: Optional[str] = None   # ISO date this event-key was first observed (orchestrator-stamped)
 
     def to_dict(self) -> dict:
         d = asdict(self)

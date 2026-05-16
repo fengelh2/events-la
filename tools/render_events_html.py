@@ -20,6 +20,25 @@ from pathlib import Path
 from typing import Optional
 
 
+# "Recently Added" strip: events stamped with first_seen within the last
+# NEW_FRESH_DAYS get an inline NEW badge; up to NEW_STRIP_CAP land in the
+# strip at the top, sorted newest-first-seen then soonest-start.
+NEW_FRESH_DAYS = 14
+NEW_STRIP_CAP = 8
+
+
+def _event_identity(e) -> tuple[str, str, str]:
+    """Identity tuple used to dedupe events across strips. Mirrors
+    rebuild_calendar._event_seen_key (minus title normalisation) — inside
+    the renderer we trust the orchestrator's first_seen field and just need
+    a deterministic hashable key for set membership."""
+    venue_id = _attr(e, "venue_id") or ""
+    title = (_attr(e, "title") or "").strip().lower()
+    s = _start(e)
+    sd = s.date().isoformat() if s else ""
+    return (venue_id, title, sd)
+
+
 WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 WEEKDAYS_SHORT = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 MONTHS = [
@@ -233,6 +252,28 @@ def render(
     feat_events.sort(key=lambda e: (_end(e) or _start(e)))
     feat_events = feat_events[:6]
 
+    # 3b. "Recently Added" — events with first_seen in the last NEW_FRESH_DAYS,
+    # excluding anything already in "Don't Miss". Capped at NEW_STRIP_CAP;
+    # inline NEW badges in the agenda below tag the same fresh keys.
+    fresh_cutoff = (now.date() - timedelta(days=NEW_FRESH_DAYS)).isoformat()
+    fresh_keys: set = set()
+    for e in visible:
+        fs = _attr(e, "first_seen")
+        if fs and fs >= fresh_cutoff and (_attr(e, "audience") or "general") == "general":
+            fresh_keys.add(_event_identity(e))
+    featured_keys = {_event_identity(e) for e in feat_events}
+    new_pool = [
+        e for e in visible
+        if _event_identity(e) in fresh_keys and _event_identity(e) not in featured_keys
+    ]
+    new_pool.sort(key=lambda e: (
+        -(date.fromisoformat(_attr(e, "first_seen")).toordinal()
+          if _attr(e, "first_seen") else 0),
+        _start(e),
+    ))
+    new_events = new_pool[:NEW_STRIP_CAP]
+    new_overflow = max(0, len(new_pool) - NEW_STRIP_CAP)
+
     # 4. Group the rest by ISO week
     week_groups: list[tuple[str, list]] = _group_by_week(visible, now)
 
@@ -244,6 +285,9 @@ def render(
         subtitle=subtitle or _long_date(now),
         now=now,
         feat_events=feat_events,
+        new_events=new_events,
+        new_overflow=new_overflow,
+        fresh_keys=fresh_keys,
         week_groups=week_groups,
         featured=featured,
         visible_events=visible,
@@ -553,7 +597,12 @@ def _render_html(
     visible_events: list,
     venue_meta: Optional[dict] = None,
     header_eyebrow: Optional[str] = None,
+    new_events: Optional[list] = None,
+    new_overflow: int = 0,
+    fresh_keys: Optional[set] = None,
 ) -> str:
+    new_events = new_events or []
+    fresh_keys = fresh_keys or set()
     venues_by_city = _collect_venues_by_city(visible_events, venue_meta=venue_meta)
     # Flatten to {chip_id: {venue_ids: set}} — one entry per chip, even if the chip
     # controls multiple sources (Kunstpalast + Kunstpalast-current → one chip).
@@ -780,14 +829,30 @@ def _render_html(
     parts.append('  </div>')
     parts.append('  </div>')  # close .filter-panel
 
-    # Featured / "Nicht verpassen"
+    # Featured / "Don't Miss"
     if feat_events:
         parts.append('  <section class="featured">')
         parts.append('    <h2 class="featured-heading"><span class="star">★</span> Don\'t Miss</h2>')
         parts.append('    <div class="featured-grid">')
         for ev in feat_events:
-            parts.append(_render_featured_card(ev, now))
+            parts.append(_render_featured_card(ev, now, fresh_keys=fresh_keys))
         parts.append('    </div>')
+        parts.append('  </section>')
+
+    # "Recently Added" — events with first_seen in last NEW_FRESH_DAYS that
+    # aren't already in Don't Miss. Same card layout, teal accent.
+    if new_events:
+        parts.append('  <section class="new-strip">')
+        parts.append('    <h2 class="featured-heading"><span class="new-star">✨</span> Recently Added</h2>')
+        parts.append('    <div class="featured-grid">')
+        for ev in new_events:
+            parts.append(_render_featured_card(ev, now, fresh_keys=fresh_keys))
+        parts.append('    </div>')
+        if new_overflow > 0:
+            parts.append(
+                f'    <p class="new-overflow">'
+                f'+ {new_overflow} more new events tagged below</p>'
+            )
         parts.append('  </section>')
 
     # Weekly agenda — each week wrapped in .week for clean filter targeting.
@@ -811,9 +876,9 @@ def _render_html(
                 by_day.setdefault(s.date(), []).append(e)
         if ongoing:
             ongoing.sort(key=lambda x: (_end(x) or _start(x)))
-            parts.append(_render_ongoing_block(ongoing, now, featured))
+            parts.append(_render_ongoing_block(ongoing, now, featured, fresh_keys=fresh_keys))
         for d in sorted(by_day):
-            parts.append(_render_day_block(d, by_day[d], now, featured))
+            parts.append(_render_day_block(d, by_day[d], now, featured, fresh_keys=fresh_keys))
         parts.append('    </div>')
     parts.append('    <p class="filter-empty">No events in this category.</p>')
     parts.append('  </section>')
@@ -956,7 +1021,7 @@ def _render_html(
     return "\n".join(parts)
 
 
-def _render_featured_card(ev, now: datetime) -> str:
+def _render_featured_card(ev, now: datetime, fresh_keys: Optional[set] = None) -> str:
     title = html.escape(_attr(ev, "title") or "")
     venue_name_raw = _attr(ev, "venue_name") or ""
     venue = html.escape(venue_name_raw)
@@ -997,12 +1062,14 @@ def _render_featured_card(ev, now: datetime) -> str:
     city_slug = _city_slug(_attr(ev, 'city') or '')
     venue_id_attr = html.escape(_attr(ev, "venue_id") or "")
     when_attr = " ".join(_when_tags(s, e, now))
+    is_fresh = bool(fresh_keys) and _event_identity(ev) in fresh_keys
+    badge_attr = "" if is_fresh else " hidden"
     return f"""    <a class="featured-card cat-{cat_slug} city-{city_slug}" href="{url}" target="_blank" rel="noopener noreferrer" data-venue="{venue_id_attr}" data-when="{when_attr}">
       <div class="fc-band"></div>
       <div class="fc-inner">
         {pill_html}
         <button type="button" class="fav-btn fc-fav" aria-label="Mark as favorite">♡</button>
-        <div class="fc-title"><span class="new-badge" hidden>NEW</span>{title}</div>
+        <div class="fc-title"><span class="new-badge"{badge_attr}>NEW</span>{title}</div>
         <div class="fc-venue">{venue} · {city}</div>
         <div class="fc-date">{date_line}</div>
         {f'<div class="fc-desc">{description}</div>' if description else ''}
@@ -1011,11 +1078,12 @@ def _render_featured_card(ev, now: datetime) -> str:
     </a>"""
 
 
-def _render_day_block(d: date, evs: list, now: datetime, featured: set) -> str:
+def _render_day_block(d: date, evs: list, now: datetime, featured: set,
+                       fresh_keys: Optional[set] = None) -> str:
     weekday = WEEKDAYS[d.weekday()]
     month = MONTHS_SHORT[d.month - 1]
     label = f"{weekday}, {month} {d.day}"
-    rows = "\n".join(_render_row(e, now, featured) for e in evs)
+    rows = "\n".join(_render_row(e, now, featured, fresh_keys=fresh_keys) for e in evs)
     return f"""    <div class="day">
       <h3 class="day-heading">{html.escape(label)}</h3>
       <div class="rows">
@@ -1024,10 +1092,11 @@ def _render_day_block(d: date, evs: list, now: datetime, featured: set) -> str:
     </div>"""
 
 
-def _render_ongoing_block(evs: list, now: datetime, featured: set) -> str:
-    """Render ongoing exhibitions under a 'Aktuell zu sehen' heading at the top
+def _render_ongoing_block(evs: list, now: datetime, featured: set,
+                            fresh_keys: Optional[set] = None) -> str:
+    """Render ongoing exhibitions under a 'Now Showing' heading at the top
     of their containing week. Avoids the per-day stretching of multi-month shows."""
-    rows = "\n".join(_render_row(e, now, featured) for e in evs)
+    rows = "\n".join(_render_row(e, now, featured, fresh_keys=fresh_keys) for e in evs)
     return f"""    <div class="day day-ongoing">
       <h3 class="day-heading">Now Showing</h3>
       <div class="rows">
@@ -1036,7 +1105,7 @@ def _render_ongoing_block(evs: list, now: datetime, featured: set) -> str:
     </div>"""
 
 
-def _render_row(ev, now: datetime, featured: set) -> str:
+def _render_row(ev, now: datetime, featured: set, fresh_keys: Optional[set] = None) -> str:
     s = _start(ev)
     e = _end(ev)
     title = _attr(ev, "title") or ""
@@ -1090,10 +1159,14 @@ def _render_row(ev, now: datetime, featured: set) -> str:
 
     venue_id_attr = html.escape(_attr(ev, "venue_id") or "")
     when_attr = " ".join(_when_tags(s, e, now))
+    is_fresh = bool(fresh_keys) and _event_identity(ev) in fresh_keys
+    badge_attr = "" if is_fresh else " hidden"
+    if is_fresh:
+        classes.append("is-server-new")
     return f"""        <a class="{' '.join(classes)}" href="{url}" target="_blank" rel="noopener noreferrer" data-venue="{venue_id_attr}" data-when="{when_attr}">
           <div class="row-time">{html.escape(time_display)}</div>
           <div class="row-body">
-            <div class="row-title"><span class="new-badge" hidden>NEW</span>{title_html}</div>
+            <div class="row-title"><span class="new-badge"{badge_attr}>NEW</span>{title_html}</div>
             <div class="row-venue">{venue} · {city}</div>
             <div class="row-meta">{relative_html}</div>
             {extras_text}
@@ -1375,6 +1448,16 @@ _PAGE_HEAD = """<!DOCTYPE html>
       margin: 0 0 18px;
     }}
     .featured-heading .star {{ font-size: 16px; margin-right: 6px; }}
+    /* "Recently Added" strip — mirrors .featured but with a teal accent */
+    .new-strip {{ margin-bottom: 48px; }}
+    .new-strip .featured-heading {{ color: #0a8a72; }}
+    .new-strip .new-star {{ font-size: 14px; margin-right: 6px; }}
+    .new-strip .new-overflow {{
+      margin: 10px 0 0;
+      font-size: 12px;
+      color: var(--muted);
+      text-align: right;
+    }}
     .featured-grid {{
       display: grid;
       grid-template-columns: repeat(2, 1fr);

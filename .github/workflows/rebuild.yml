@@ -48,6 +48,19 @@ jobs:
       - name: Rebuild events.html
         run: python tools/rebuild_calendar.py --verbose
 
+      # Persist the seen-events state file back to main so the NEW badge
+      # has a stable cross-run memory. Without this every nightly rebuild
+      # would start with an empty state file and re-seed bootstrap.
+      - name: Commit seen-events state
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if ! git diff --quiet data/seen_events.json; then
+            git add data/seen_events.json
+            git commit -m "auto: update seen_events.json"
+            git push origin main
+          fi
+
       - name: Stage for deploy
         run: |
           mkdir -p _deploy
