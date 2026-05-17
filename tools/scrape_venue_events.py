@@ -686,6 +686,23 @@ def _tribe_to_event(raw: dict, venue_row: dict, venue_filter: str | None = None)
     venue_name = ""
     if isinstance(venue_obj, dict):
         venue_name = _html_decode(venue_obj.get("venue") or "")
+
+    # Optional filters mirrored from momEvents' et4/toubiz parsers — useful
+    # when a Tribe feed starts emitting venue-tagged corporate/restaurant noise.
+    skip_substrings = [s.lower() for s in (venue_row.get("skip_venue_substrings") or [])]
+    if skip_substrings and venue_name:
+        if any(s in venue_name.lower() for s in skip_substrings):
+            # Keep the event but fold it under the parent chip
+            venue_name = ""
+
+    # venue_id_overrides: {tribe_venue_name: canonical_venue_id} so a Tribe
+    # feed's sub-venue can fold into an existing top-level chip (e.g. a
+    # Pasadena-Playhouse studio space → main pasadena-playhouse chip).
+    vid_overrides = venue_row.get("venue_id_overrides") or {}
+    if venue_name and venue_name in vid_overrides:
+        venue_id = vid_overrides[venue_name]
+    else:
+        venue_id = venue_row["id"]
     venue_name = venue_name or venue_row.get("display_name") or venue_row["name"]
 
     # Single-venue source: trust the venue's declared category. Title overlay
@@ -697,7 +714,7 @@ def _tribe_to_event(raw: dict, venue_row: dict, venue_filter: str | None = None)
         title=title,
         start=start,
         end=end,
-        venue_id=venue_row["id"],
+        venue_id=venue_id,
         venue_name=venue_name,
         city=venue_row.get("city", ""),
         category=category,
